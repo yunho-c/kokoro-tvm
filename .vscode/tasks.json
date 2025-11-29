@@ -1,0 +1,14 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Export Kokoro into ONNX (unquantized)",
+            "type": "shell",
+            "command": "uv run kokoro-onnx export",
+            "options": {
+                "cwd": "${workspaceFolder}/external/kokoro-onnx-export"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
