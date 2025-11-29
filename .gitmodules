@@ -1,3 +1,6 @@
 [submodule "external/kokoro-onnx-export"]
 	path = external/kokoro-onnx-export
 	url = https://github.com/yunho-c/kokoro-onnx-export
+[submodule "reference/tvm"]
+	path = reference/tvm
+	url = https://github.com/apache/tvm
