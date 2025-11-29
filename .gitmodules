@@ -4,3 +4,6 @@
 [submodule "reference/tvm"]
 	path = reference/tvm
 	url = https://github.com/apache/tvm
+[submodule "external/kokoro"]
+	path = external/kokoro
+	url = https://github.com/yunho-c/kokoro
