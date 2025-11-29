@@ -1,0 +1,3 @@
+[submodule "external/kokoro-onnx-export"]
+	path = external/kokoro-onnx-export
+	url = https://github.com/yunho-c/kokoro-onnx-export
