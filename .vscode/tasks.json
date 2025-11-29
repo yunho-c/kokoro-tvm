@@ -9,6 +9,37 @@
                 "cwd": "${workspaceFolder}/external/kokoro-onnx-export"
             },
             "problemMatcher": []
+        },
+        {
+            "label": "Compile ONNX with TVM",
+            "type": "shell",
+            "command": "python scripts/compile_onnx.py",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PYTHONPATH": "${workspaceFolder}/reference/tvm/python:${workspaceFolder}/reference/tvm/3rdparty/tvm-ffi/python:${env:PYTHONPATH}",
+                    "DYLD_LIBRARY_PATH": "${workspaceFolder}/reference/tvm/build/lib:${env:DYLD_LIBRARY_PATH}"
+                }
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Initialize TVM Submodules",
+            "type": "shell",
+            "command": "git submodule update --init --recursive",
+            "options": {
+                "cwd": "${workspaceFolder}/reference/tvm"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build TVM",
+            "type": "shell",
+            "command": "cmake .. && make -j$(sysctl -n hw.ncpu)",
+            "options": {
+                "cwd": "${workspaceFolder}/reference/tvm/build"
+            },
+            "problemMatcher": []
         }
     ]
 }
