@@ -11,16 +11,9 @@
             "problemMatcher": []
         },
         {
-            "label": "Compile ONNX with TVM",
+            "label": "Compile Kokoro (ONNX) with TVM",
             "type": "shell",
             "command": "python scripts/compile_onnx.py",
-            "options": {
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "PYTHONPATH": "${workspaceFolder}/reference/tvm/python:${workspaceFolder}/reference/tvm/3rdparty/tvm-ffi/python:${env:PYTHONPATH}",
-                    "DYLD_LIBRARY_PATH": "${workspaceFolder}/reference/tvm/build/lib:${env:DYLD_LIBRARY_PATH}"
-                }
-            },
             "problemMatcher": []
         },
         {
@@ -39,6 +32,12 @@
             "options": {
                 "cwd": "${workspaceFolder}/reference/tvm/build"
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "Compile Kokoro (PyTorch) with TVM",
+            "type": "shell",
+            "command": "python scripts/compile_kokoro.py",
             "problemMatcher": []
         }
     ]
