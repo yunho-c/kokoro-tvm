@@ -1,0 +1,1 @@
+- Move `scripts` to inside `src/kokoro_tvm`, to make things invokeable from CLI without repo clone. (Let's do this when the git tree is clean, so we can have a clean, isolated commit.)
