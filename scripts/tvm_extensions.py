@@ -5,6 +5,14 @@ from tvm.relax.frontend.torch.exported_program_translator import ExportedProgram
 import operator
 from typing import Callable
 
+# Debug flag - can be set from outside to control debug output
+DEBUG_ENABLED = False
+
+def debug_print(*args, **kwargs):
+    """Print only if debug mode is enabled."""
+    if DEBUG_ENABLED:
+        print(*args, **kwargs)
+
 # Save original method
 original_create_convert_map = ExportedProgramImporter.create_convert_map
 
@@ -121,7 +129,7 @@ def _full(self, node):
         try:
             value = relax.const(value, dtype)
         except ValueError:
-            print(f"DEBUG: _full value type: {type(value)}, value: {value}")
+            debug_print(f"DEBUG: _full value type: {type(value)}, value: {value}")
             raise
     
     return self.block_builder.emit(
@@ -146,7 +154,7 @@ def _rand(self, node):
          # Or it's a Node that produces a list?
          # If node.args[0] is a list:
          new_size = []
-         print(f"DEBUG: _rand size arg: {size}")
+         debug_print(f"DEBUG: _rand size arg: {size}")
          for s in size:
              if isinstance(s, torch.fx.Node):
                  val = self.env[s]
@@ -216,7 +224,7 @@ def _create_scalar_tensor(self, value, dtype):
     if isinstance(value, (tvm.tir.IntImm, tvm.tir.FloatImm)):
         return relax.const(value.value, dtype)
     if isinstance(value, tvm.tir.PrimExpr):
-        print(f"DEBUG: symbolic _create_scalar_tensor with value={value} type={type(value)}")
+        debug_print(f"DEBUG: symbolic _create_scalar_tensor with value={value} type={type(value)}")
         # Handle symbolic variables (like SizeVar)
         # Create a 1-element shape [value]
         shape_expr = relax.ShapeExpr([value])
@@ -229,7 +237,7 @@ def _create_scalar_tensor(self, value, dtype):
             scalar_tensor = self.block_builder.emit(relax.op.astype(scalar_tensor, dtype))
         return scalar_tensor
 
-    print(f"DEBUG: emit_te _create_scalar_tensor with value={value} type={type(value)}")
+    debug_print(f"DEBUG: emit_te _create_scalar_tensor with value={value} type={type(value)}")
     return self.block_builder.emit_te(
         lambda val: tvm.te.compute((), lambda *i: tvm.tir.Cast(dtype, val), name="scalar"),
         value
@@ -321,13 +329,13 @@ def _binary_op(self, relax_op: Callable, intrinsic_op: Callable) -> Callable:
                       target_sinfo = rhs.struct_info
                   
                   if target_sinfo is not None:
-                       print(f"DEBUG: op={relax_op.__name__ if hasattr(relax_op, '__name__') else 'unknown'} node={node.name} output_shape=None. Forcing to {target_sinfo.shape}.")
+                       debug_print(f"DEBUG: op={relax_op.__name__ if hasattr(relax_op, '__name__') else 'unknown'} node={node.name} output_shape=None. Forcing to {target_sinfo.shape}.")
                        res = self.block_builder.match_cast(res, target_sinfo)
                        # Update s_res
                        if hasattr(res, "struct_info"): s_res = res.struct_info.shape
 
         if s_res is None and not is_prim and isinstance(res, relax.Expr):
-              print(f"DEBUG: op={relax_op.__name__ if hasattr(relax_op, '__name__') else 'unknown'} node={node.name} output_shape=None")
+              debug_print(f"DEBUG: op={relax_op.__name__ if hasattr(relax_op, '__name__') else 'unknown'} node={node.name} output_shape=None")
               if hasattr(lhs, "struct_info"): print(f"  LHS info: {lhs.struct_info}")
               if hasattr(rhs, "struct_info"): print(f"  RHS info: {rhs.struct_info}")
         
@@ -338,15 +346,15 @@ def _binary_op(self, relax_op: Callable, intrinsic_op: Callable) -> Callable:
 ExportedProgramImporter._binary_op = _binary_op
 
 def _arange(self, node):
-    print(f"DEBUG: _arange node.args: {node.args}")
+    debug_print(f"DEBUG: _arange node.args: {node.args}")
     start_end_step = []
     for x in node.args:
         if isinstance(x, torch.fx.Node):
             val = self.env[x]
-            print(f"DEBUG: _arange env[x]: {val}, type: {type(val)}")
+            debug_print(f"DEBUG: _arange env[x]: {val}, type: {type(val)}")
             start_end_step.append(val)
         else:
-            print(f"DEBUG: _arange const arg: {x}, type: {type(x)}")
+            debug_print(f"DEBUG: _arange const arg: {x}, type: {type(x)}")
             start_end_step.append(x)
             
     dtype = self._convert_data_type(
@@ -552,7 +560,7 @@ def _lstm(self, node):
             h_init = None
             c_init = None
             if hx is not None:
-                print(f"DEBUG: _lstm hx type: {type(hx)}")
+                debug_print(f"DEBUG: _lstm hx type: {type(hx)}")
                 if isinstance(hx, (list, tuple)):
                     h0 = hx[0]
                     c0 = hx[1]
@@ -573,7 +581,7 @@ def _lstm(self, node):
                 tvm.tir.sigmoid, tvm.tir.tanh, tvm.tir.tanh,
                 reverse # reverse argument
             )
-            print(f"DEBUG: _lstm lstm_out type: {type(lstm_out)}")
+            debug_print(f"DEBUG: _lstm lstm_out type: {type(lstm_out)}")
             
             if isinstance(lstm_out, (list, tuple)) or "Array" in str(type(lstm_out)):
                  out_seq = lstm_out[0]
@@ -633,9 +641,9 @@ def _convolution(self, node):
 
     input_shape = self.shape_of(x)
     producer_name = node.args[0].name if hasattr(node.args[0], 'name') else str(node.args[0])
-    print(f"DEBUG: _convolution node={node.name}, producer={producer_name}, input_shape={input_shape}, type(x)={type(x)}")
+    debug_print(f"DEBUG: _convolution node={node.name}, producer={producer_name}, input_shape={input_shape}, type(x)={type(x)}")
     if hasattr(x, "struct_info"):
-        print(f"DEBUG: x.struct_info={x.struct_info}")
+        debug_print(f"DEBUG: x.struct_info={x.struct_info}")
 
     if input_shape is None:
         # Try to infer or fallback
@@ -674,9 +682,9 @@ def _convolution(self, node):
     # Debug output shape
     out_shape = self.shape_of(out)
     if out_shape is None:
-        print(f"DEBUG: _convolution output shape matches None! node={node.name}")
+        debug_print(f"DEBUG: _convolution output shape matches None! node={node.name}")
     else:
-        # print(f"DEBUG: _convolution output shape: {out_shape}")
+        # debug_print(f"DEBUG: _convolution output shape: {out_shape}")
         pass
         
     return out
@@ -688,7 +696,7 @@ def _leaky_relu(self, node):
     # Check kwarg
     if "negative_slope" in node.kwargs: negative_slope = node.kwargs["negative_slope"]
     
-    print(f"DEBUG: _leaky_relu node={node.name}, input_shape={self.shape_of(x)}, producer={node.args[0].name if hasattr(node.args[0], 'name') else str(node.args[0])}")
+    debug_print(f"DEBUG: _leaky_relu node={node.name}, input_shape={self.shape_of(x)}, producer={node.args[0].name if hasattr(node.args[0], 'name') else str(node.args[0])}")
     try:
         return self.block_builder.emit(relax.op.nn.leaky_relu(x, negative_slope))
     except AttributeError:
@@ -714,32 +722,32 @@ def _mul(self, node):
     
     # Only print for later nodes to avoid spam? or inspect node name
     if "mul_389" in node.name or (isinstance(ls, relax.ShapeExpr) and isinstance(rs, relax.ShapeExpr) and (ls is None or rs is None)):
-        print(f"DEBUG: _mul node={node.name} lhs_shape={ls} rhs_shape={rs}")
+        debug_print(f"DEBUG: _mul node={node.name} lhs_shape={ls} rhs_shape={rs}")
         
     # Determine common dtype
     target_dtype = None
     arg_producers = []
     for i, arg in enumerate([lhs, rhs]):
-         # print(f"DEBUG: arg[{i}] type={type(arg)}")
+         # debug_print(f"DEBUG: arg[{i}] type={type(arg)}")
          arg_prod = "unknown"
          if hasattr(node.args[i], "name"): arg_prod = node.args[i].name
          arg_producers.append(arg_prod)
          if hasattr(arg, "struct_info"):
-             # print(f"DEBUG: arg[{i}] struct_info={arg.struct_info}")
+             # debug_print(f"DEBUG: arg[{i}] struct_info={arg.struct_info}")
              if hasattr(arg.struct_info, "dtype"):
                  d = arg.struct_info.dtype
-                 # print(f"DEBUG: arg[{i}] dtype={d}")
+                 # debug_print(f"DEBUG: arg[{i}] dtype={d}")
                  if "float" in d:
                      target_dtype = d
                      break
                  if target_dtype is None: target_dtype = d
          else:
-             # print(f"DEBUG: arg[{i}] has no struct_info")
+             # debug_print(f"DEBUG: arg[{i}] has no struct_info")
              pass
     
     # Force print if likely failing node
     if "mul_389" in node.name or target_dtype is None or target_dtype == "int64" or any(self.shape_of(a) is None for a in [lhs, rhs] if hasattr(a, "struct_info")):
-         print(f"DEBUG: _mul node={node.name}, producers={arg_producers}, detected target_dtype={target_dtype}") 
+         debug_print(f"DEBUG: _mul node={node.name}, producers={arg_producers}, detected target_dtype={target_dtype}") 
          print([str(a.struct_info) if hasattr(a, "struct_info") else type(a) for a in [lhs, rhs]])
          pass
 
@@ -749,7 +757,7 @@ def _mul(self, node):
         if isinstance(val, float): val_dtype = "float32"
         if dtype_hint: val_dtype = dtype_hint
         
-        print(f"DEBUG: ensure_tensor val={val} type={type(val)} dtype_hint={dtype_hint} -> val_dtype={val_dtype}")
+        debug_print(f"DEBUG: ensure_tensor val={val} type={type(val)} dtype_hint={dtype_hint} -> val_dtype={val_dtype}")
 
         if isinstance(val, (int, float, bool)):
              return relax.const(val, val_dtype)
@@ -785,13 +793,13 @@ def _cat(self, node):
     dim = args[1] if len(args) > 1 else 0
     
     shapes = [self.shape_of(t) for t in tensors]
-    print(f"DEBUG: _cat node={node.name}, dim={dim}, input_shapes={shapes}")
+    debug_print(f"DEBUG: _cat node={node.name}, dim={dim}, input_shapes={shapes}")
     
     out = self.block_builder.emit(relax.op.concat(tensors, axis=dim))
     
     # Force shape if inference failed (likely due to symbolic mismatch in non-concat dims)
     if self.shape_of(out) is None:
-        print(f"DEBUG: _cat output shape is None. Attempting to force shape based on first input.")
+        debug_print(f"DEBUG: _cat output shape is None. Attempting to force shape based on first input.")
         if shapes[0] is not None:
             # Assuming all inputs match the first input on non-concat dims
             # And we just sum the concat dim
@@ -823,7 +831,7 @@ def _cat(self, node):
             if not unknown_dim:
                 target_shape_list[dim] = total_dim_size
                 target_shape = relax.ShapeExpr(target_shape_list)
-                print(f"DEBUG: Forcing cat output shape: {target_shape}")
+                debug_print(f"DEBUG: Forcing cat output shape: {target_shape}")
                 
                 # Use match_cast to enforce this shape
                 out = self.block_builder.match_cast(out, relax.TensorStructInfo(target_shape, dtype=out.struct_info.dtype))
@@ -895,7 +903,7 @@ def _index_tensor(self, node):
              if isinstance(val, relax.Expr) and hasattr(val, "struct_info"):
                  if isinstance(val.struct_info, relax.TensorStructInfo):
                      if val.struct_info.dtype not in ("int32", "int64"):
-                         print(f"DEBUG: Casting index node {idx_node} from {val.struct_info.dtype} to int64")
+                         debug_print(f"DEBUG: Casting index node {idx_node} from {val.struct_info.dtype} to int64")
                          new_val = self.block_builder.emit(relax.op.astype(val, "int64"))
                          self.env[idx_node] = new_val
 
@@ -936,7 +944,7 @@ def _index_put(self, node):
                          break
     
     if has_bool:
-        print(f"DEBUG: _index_put handling bool indices for node {node.name}")
+        debug_print(f"DEBUG: _index_put handling bool indices for node {node.name}")
         # Assuming single bool mask for now (common case)
         if len(indices) == 1 and indices[0] is not None:
             mask = indices[0]
@@ -953,7 +961,7 @@ def _index_put(self, node):
                  # For now, just trust scalar usage or broadcasting if ndim matches?
             
             if use_where:
-                print(f"DEBUG: Using where() optimization for bool index_put")
+                debug_print(f"DEBUG: Using where() optimization for bool index_put")
                 return self.block_builder.emit(relax.op.where(mask, values, data))
 
             # argwhere fallback

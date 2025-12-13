@@ -1,38 +1,22 @@
-
-import torch
-import sys
-import os
-import json
 import argparse
-from huggingface_hub import hf_hub_download
+import json
+import os
+import sys
+
+import operator
+import torch
+import torch.nn.functional as F
 import tvm
+import tvm.relax.op as relax_op
+from huggingface_hub import hf_hub_download
+from kokoro.istftnet import Decoder, SineGen
 from tvm import relax
 from tvm.relax.frontend.torch import from_exported_program
-
-# Add external/kokoro to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'external', 'kokoro'))
-from kokoro.istftnet import Decoder
-
 from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
-from tvm import relax
-import operator
-import tvm.relax.op as relax_op
 
-# Import TVM extensions which monkeypatches ExportedProgramImporter
-try:
-    import scripts.tvm_extensions
-    print("Loaded scripts.tvm_extensions")
-except ImportError:
-    try:
-        import tvm_extensions
-        print("Loaded tvm_extensions (local)")
-    except ImportError:
-        print("Warning: Could not load tvm_extensions. Using default importer (might fail).")
+import tvm_extensions  # monkeypatches ExportedProgramImporter
 
 # Monkeypatch SineGen to be friendly to symbolic shapes (Same as in export_decoder.py)
-from kokoro.istftnet import SineGen
-import torch.nn.functional as F
-
 def _f02sine_friendly(self, f0_values):
     rad_values = (f0_values / self.sampling_rate) % 1
     rand_ini = torch.rand(f0_values.shape[0], f0_values.shape[2], device=f0_values.device)
@@ -54,7 +38,7 @@ if not hasattr(SineGen, '_old_f02sine'):
     SineGen._f02sine = _f02sine_friendly
 
 def main(args):
-    # 1. Initialize Decoder
+    # Initialize Decoder
     repo_id = 'hexgrad/Kokoro-82M'
     config_path = hf_hub_download(repo_id=repo_id, filename='config.json')
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -74,7 +58,7 @@ def main(args):
     )
     decoder.eval()
 
-    # 2. Prepare Inputs with STATIC shapes
+    # Prepare Inputs with STATIC shapes
     batch_size = 1
     seq_len = args.seq_len  # Static sequence length from CLI
     
@@ -85,7 +69,7 @@ def main(args):
     
     print(f"Static inputs: asr={asr.shape}, f0={f0.shape}, n={n.shape}, s={s.shape}")
 
-    # 3. Export with STATIC shapes (no dynamic_shapes)
+    # Export with STATIC shapes (no dynamic_shapes)
     print(f"Exporting model with static seq_len={seq_len}...")
     exported_program = torch.export.export(
         decoder,
@@ -93,7 +77,7 @@ def main(args):
         # No dynamic_shapes - using static shapes for reliable TVM compilation
     )
     
-    # 4. Compile with TVM
+    # Compile with TVM
     print("Importing into TVM Relax...")
     # NOTE: We skip run_decompositions() here because we are using the importer class directly.
     # If run_decompositions is not run, we are importing the ATen/Core Aten graph directly?
@@ -148,14 +132,14 @@ def main(args):
     target = tvm.target.Target("llvm -opt-level=3")
     print(f"Compiling for target: {target}")
     
-    # seq = tvm.transform.Sequential([
-    #     relax.transform.DecomposeOpsForInference(),
-    #     relax.transform.LegalizeOps(),
-    #     relax.transform.AnnotateTIROpPattern(),
-    #     relax.transform.FoldConstant(),
-    #     relax.transform.FuseOps(),
-    #     relax.transform.FuseTIR(),
-    # ])
+    seq = tvm.transform.Sequential([
+        relax.transform.DecomposeOpsForInference(),
+        relax.transform.LegalizeOps(),
+        relax.transform.AnnotateTIROpPattern(),
+        relax.transform.FoldConstant(),
+        relax.transform.FuseOps(),
+        relax.transform.FuseTIR(),
+    ])
     
     with target:
         # mod = seq(mod)
@@ -193,7 +177,7 @@ def main(args):
     ex.export_library(output_path)
     print(f"Saved compiled library to: {output_path}")
     
-    # 5. Verify
+    # Verify
     dev = tvm.cpu()
     vm = relax.VirtualMachine(ex, dev)
     
@@ -203,11 +187,12 @@ def main(args):
     n_in = torch.randn(1, test_len * 2).numpy()
     s_in = torch.randn(1, style_dim).numpy()
     
+    # Convert numpy arrays to TVM tensors using tvm.runtime.tensor
     inputs = [
-        tvm.nd.array(asr_in, dev),
-        tvm.nd.array(f0_in, dev),
-        tvm.nd.array(n_in, dev),
-        tvm.nd.array(s_in, dev)
+        tvm.runtime.tensor(asr_in, device=dev),
+        tvm.runtime.tensor(f0_in, device=dev),
+        tvm.runtime.tensor(n_in, device=dev),
+        tvm.runtime.tensor(s_in, device=dev)
     ]
     
     # We kept params as input. 
@@ -231,14 +216,40 @@ def main(args):
         unwrap_unit_return_tuple=False, 
         no_bind_return_tuple=False
     )
+    
+    # Rename 'main' to 'decoder_forward' for consistency
+    new_funcs = {}
+    for gv, func in mod.functions.items():
+        if gv.name_hint == "main":
+            new_gv = tvm.ir.GlobalVar("decoder_forward")
+            if hasattr(func, "attrs") and func.attrs is not None and "global_symbol" in func.attrs:
+                new_attrs = dict(func.attrs)
+                new_attrs["global_symbol"] = "decoder_forward"
+                func = func.with_attrs(new_attrs)
+            new_funcs[new_gv] = func
+        else:
+            new_funcs[gv] = func
+    mod = tvm.IRModule(new_funcs, attrs=mod.attrs)
+    
+    # Apply the same transformations as the main compilation
     with target:
         mod = seq(mod)
-    ex = relax.build(mod, target)
+    
+    with tvm.transform.PassContext(opt_level=3, config={"tir.enable_debug": False}):
+        ex = relax.build(mod, target)
     vm = relax.VirtualMachine(ex, dev)
     
     print(f"Running inference with test_len={test_len}...")
-    output = vm["main"](*inputs)
-    print("Output shape:", output.shape)
+    output = vm["decoder_forward"](*inputs)
+    
+    # Handle output - could be a single tensor or an Array of tensors
+    if hasattr(output, 'shape'):
+        print("Output shape:", output.shape)
+    else:
+        # Output is an Array (tuple of tensors)
+        print(f"Output is an Array with {len(output)} elements:")
+        for i, out in enumerate(output):
+            print(f"  Output[{i}] shape: {out.shape}")
     print("Verification Successful!")
 
 if __name__ == "__main__":
@@ -247,5 +258,12 @@ if __name__ == "__main__":
                         help="Static sequence length for compilation (default: 150)")
     parser.add_argument("--output", type=str, default="decoder_compiled.so",
                         help="Output path for compiled library (default: decoder_compiled.so)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug output from TVM extensions")
     args = parser.parse_args()
+    
+    # Configure debug output in tvm_extensions
+    if args.debug:
+        tvm_extensions.DEBUG_ENABLED = True
+    
     main(args)
