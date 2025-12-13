@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+import numpy as np
+
 import operator
 import torch
 import torch.nn.functional as F
@@ -123,7 +125,7 @@ def main(args):
     importer = ExportedProgramImporter()
     mod = importer.from_exported_program(
         exported_program, 
-        keep_params_as_input=True,
+        keep_params_as_input=False,  # Embed weights in the compiled module
         unwrap_unit_return_tuple=False, 
         no_bind_return_tuple=False
     )
@@ -223,50 +225,8 @@ def main(args):
         tvm.runtime.tensor(s_in, device=dev)
     ]
     
-    # We kept params as input. 
-    # However, from_exported_program behavior on params depends on keep_params_as_input.
-    # If True, params are inputs. If False, they are bound to module.
-    # Let's check how many args 'main' expects.
-    # We can inspect input_info if available, or just try running.
-    # If keep_params_as_input=True, needed args = inputs + params.
-    # If keep_params_as_input=False (default), params are constants/bound.
     
-    # Let's re-import with keep_params_as_input=False (default) to make inference call easier
-    # Or just use the one we have?
-    # If True, we need to pass params.
-    # Let's use False for simplicity of verification now.
-    
-    print("Re-importing with keep_params_as_input=False for easy inference...")
-    importer = ExportedProgramImporter()
-    mod = importer.from_exported_program(
-        exported_program, 
-        keep_params_as_input=False,
-        unwrap_unit_return_tuple=False, 
-        no_bind_return_tuple=False
-    )
-    
-    # Rename 'main' to 'decoder_forward' for consistency
-    new_funcs = {}
-    for gv, func in mod.functions.items():
-        if gv.name_hint == "main":
-            new_gv = tvm.ir.GlobalVar("decoder_forward")
-            if hasattr(func, "attrs") and func.attrs is not None and "global_symbol" in func.attrs:
-                new_attrs = dict(func.attrs)
-                new_attrs["global_symbol"] = "decoder_forward"
-                func = func.with_attrs(new_attrs)
-            new_funcs[new_gv] = func
-        else:
-            new_funcs[gv] = func
-    mod = tvm.IRModule(new_funcs, attrs=mod.attrs)
-    
-    # Apply the same transformations as the main compilation
-    with target:
-        mod = seq(mod)
-    
-    with tvm.transform.PassContext(opt_level=3, config={"tir.enable_debug": False}):
-        ex = relax.build(mod, target)
-    vm = relax.VirtualMachine(ex, dev)
-    
+    # Verify using the already-built VM (weights are now embedded via keep_params_as_input=False)
     print(f"Running inference with test_len={test_len}...")
     output = vm["decoder_forward"](*inputs)
     
@@ -280,6 +240,156 @@ def main(args):
             print(f"  Output[{i}] shape: {out.shape}")
     print("Verification Successful!")
 
+
+def validate_against_pytorch(args, target):
+    """
+    Validate TVM decoder output against PyTorch decoder using real encoder data.
+    
+    This function:
+    1. Loads the full KModel (encoder + decoder)
+    2. Runs encoder on a test phrase to get real intermediate tensors
+    3. Runs both PyTorch and TVM decoders on same inputs
+    4. Compares outputs numerically
+    """
+    from kokoro.model import KModel
+    
+    print("\n" + "="*60)
+    print("VALIDATION: Comparing TVM vs PyTorch decoder")
+    print("="*60)
+    
+    # Load full Kokoro model
+    repo_id = 'hexgrad/Kokoro-82M'
+    print(f"Loading full KModel from {repo_id}...")
+    kmodel = KModel(repo_id=repo_id, disable_complex=True)
+    kmodel.eval()
+    
+    # Load a voice pack
+    voice_name = 'af_heart'
+    print(f"Loading voice pack: {voice_name}...")
+    voice_path = hf_hub_download(repo_id=repo_id, filename=f'voices/{voice_name}.pt')
+    voice_pack = torch.load(voice_path, weights_only=True)
+    
+    # Test phrase - phonemes for "Hello world"
+    test_phonemes = "helloworld"  # Simple ASCII for vocab lookup
+    print(f"Test phonemes: '{test_phonemes}'")
+    
+    # Convert phonemes to input_ids first to get actual phoneme count
+    input_ids = list(filter(lambda i: i is not None, 
+                           map(lambda p: kmodel.vocab.get(p), test_phonemes)))
+    input_ids = torch.LongTensor([[0, *input_ids, 0]])
+    print(f"Input IDs shape: {input_ids.shape}")
+    
+    # Get ref_s from voice pack (indexed by phoneme length - similar to KPipeline.infer)
+    # Voice pack is indexed by (phoneme_count - 1)
+    phoneme_count = len(test_phonemes)
+    ref_s = voice_pack[phoneme_count - 1]  # This gives (256,) or (1, 256)
+    if ref_s.dim() == 1:
+        ref_s = ref_s.unsqueeze(0)  # Make it (1, 256)
+    print(f"Voice embedding ref_s shape: {ref_s.shape}")
+    
+    # Run encoder to extract intermediate tensors
+    with torch.no_grad():
+        input_lengths = torch.full((1,), input_ids.shape[-1], dtype=torch.long)
+        text_mask = torch.arange(input_lengths.max()).unsqueeze(0).expand(1, -1)
+        text_mask = torch.gt(text_mask + 1, input_lengths.unsqueeze(1))
+        
+        bert_dur = kmodel.bert(input_ids, attention_mask=(~text_mask).int())
+        d_en = kmodel.bert_encoder(bert_dur).transpose(-1, -2)
+        s = ref_s[:, 128:]
+        d = kmodel.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+        x, _ = kmodel.predictor.lstm(d)
+        duration = kmodel.predictor.duration_proj(x)
+        duration = torch.sigmoid(duration).sum(axis=-1)
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        
+        indices = torch.repeat_interleave(torch.arange(input_ids.shape[1]), pred_dur)
+        pred_aln_trg = torch.zeros((input_ids.shape[1], indices.shape[0]))
+        pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
+        pred_aln_trg = pred_aln_trg.unsqueeze(0)
+        
+        en = d.transpose(-1, -2) @ pred_aln_trg
+        F0_pred, N_pred = kmodel.predictor.F0Ntrain(en, s)
+        t_en = kmodel.text_encoder(input_ids, input_lengths, text_mask)
+        asr = t_en @ pred_aln_trg
+        style_embed = ref_s[:, :128]
+    
+    print(f"\nExtracted decoder inputs:")
+    print(f"  asr shape: {asr.shape}")
+    print(f"  F0_pred shape: {F0_pred.shape}")
+    print(f"  N_pred shape: {N_pred.shape}")
+    print(f"  style_embed shape: {style_embed.shape}")
+    
+    seq_len = asr.shape[2]
+    print(f"\nActual sequence length from encoder: {seq_len}")
+    
+    # Check if we need to recompile with correct seq_len
+    if seq_len != args.seq_len:
+        print(f"WARNING: Encoder produced seq_len={seq_len}, but TVM compiled with seq_len={args.seq_len}")
+        print(f"For accurate validation, rerun with --seq-len {seq_len}")
+        return
+    
+    # Run PyTorch decoder
+    print("\nRunning PyTorch decoder...")
+    with torch.no_grad():
+        pytorch_output = kmodel.decoder(asr, F0_pred, N_pred, style_embed)
+    print(f"PyTorch output shape: {pytorch_output.shape}")
+    
+    # Run TVM decoder
+    print("\nLoading TVM compiled module...")
+    lib = tvm.runtime.load_module(args.output)
+    dev = tvm.cpu()
+    vm = relax.VirtualMachine(lib, dev)
+    
+    # Prepare TVM inputs
+    tvm_inputs = [
+        tvm.runtime.tensor(asr.numpy(), device=dev),
+        tvm.runtime.tensor(F0_pred.numpy(), device=dev),
+        tvm.runtime.tensor(N_pred.numpy(), device=dev),
+        tvm.runtime.tensor(style_embed.numpy(), device=dev)
+    ]
+    
+    print("Running TVM decoder...")
+    tvm_output = vm["decoder_forward"](*tvm_inputs)
+    
+    # Handle output format
+    if hasattr(tvm_output, 'shape'):
+        tvm_result = tvm_output.numpy()
+    else:
+        tvm_result = tvm_output[0].numpy()
+    print(f"TVM output shape: {tvm_result.shape}")
+    
+    # Compare outputs
+    pytorch_np = pytorch_output.numpy()
+    
+    # Compute metrics
+    abs_diff = np.abs(pytorch_np - tvm_result)
+    mae = np.mean(abs_diff)
+    max_error = np.max(abs_diff)
+    rel_error = mae / (np.mean(np.abs(pytorch_np)) + 1e-8)
+    
+    # Correlation
+    pytorch_flat = pytorch_np.flatten()
+    tvm_flat = tvm_result.flatten()
+    correlation = np.corrcoef(pytorch_flat, tvm_flat)[0, 1]
+    
+    print("\n" + "-"*40)
+    print("COMPARISON RESULTS:")
+    print("-"*40)
+    print(f"  Mean Absolute Error:  {mae:.6e}")
+    print(f"  Max Absolute Error:   {max_error:.6e}")
+    print(f"  Relative Error:       {rel_error:.2%}")
+    print(f"  Correlation:          {correlation:.6f}")
+    
+    # Pass/Fail threshold
+    tolerance = 1e-3
+    if mae < tolerance and correlation > 0.999:
+        print(f"\n✓ VALIDATION PASSED (MAE < {tolerance}, correlation > 0.999)")
+    else:
+        print(f"\n✗ VALIDATION FAILED (MAE={mae:.2e}, correlation={correlation:.4f})")
+    
+    print("="*60 + "\n")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compile Kokoro Decoder to TVM with static shapes")
     parser.add_argument("--seq-len", type=int, default=150, 
@@ -290,10 +400,19 @@ if __name__ == "__main__":
                         help="Enable debug output from TVM extensions")
     parser.add_argument("--no-weights", action="store_true",
                         help="Skip loading pretrained weights (use random weights for faster iteration)")
+    parser.add_argument("--validate", action="store_true",
+                        help="Validate TVM output against PyTorch using real encoder data")
     args = parser.parse_args()
     
     # Configure debug output in tvm_extensions
     if args.debug:
         tvm_extensions.DEBUG_ENABLED = True
     
+    # Store target for validation
+    target = tvm.target.Target("llvm -opt-level=3")
+    
     main(args)
+    
+    # Run validation if requested
+    if args.validate:
+        validate_against_pytorch(args, target)
