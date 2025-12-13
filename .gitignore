@@ -83,3 +83,4 @@ $RECYCLE.BIN/
 .directory
 .Trash-*
 .nfs*
+python/pixi.lock
