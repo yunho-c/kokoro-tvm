@@ -56,6 +56,34 @@ def main(args):
         disable_complex=True,
         **istftnet_params
     )
+    
+    # Load pretrained weights from HuggingFace (unless --no-weights is specified)
+    if not args.no_weights:
+        model_filename = 'kokoro-v1_0.pth'
+        print(f"Downloading pretrained weights: {model_filename}...")
+        model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+        
+        print(f"Loading decoder weights from {model_path}...")
+        state_dicts = torch.load(model_path, map_location='cpu', weights_only=True)
+        
+        # The checkpoint contains weights for all components keyed by name
+        # We only need the 'decoder' component
+        if 'decoder' in state_dicts:
+            decoder_state_dict = state_dicts['decoder']
+            # Handle 'module.' prefix from DataParallel training (same as kokoro/model.py)
+            # Check if keys have 'module.' prefix
+            first_key = next(iter(decoder_state_dict.keys()), '')
+            if first_key.startswith('module.'):
+                print("Stripping 'module.' prefix from weight keys...")
+                decoder_state_dict = {k[7:]: v for k, v in decoder_state_dict.items()}
+            decoder.load_state_dict(decoder_state_dict, strict=False)
+            print("Successfully loaded pretrained decoder weights!")
+        else:
+            print(f"Warning: 'decoder' key not found in checkpoint. Available keys: {list(state_dicts.keys())}")
+            print("Proceeding with random weights...")
+    else:
+        print("Skipping weight loading (--no-weights specified). Using random weights.")
+    
     decoder.eval()
 
     # Prepare Inputs with STATIC shapes
@@ -260,6 +288,8 @@ if __name__ == "__main__":
                         help="Output path for compiled library (default: decoder_compiled.so)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output from TVM extensions")
+    parser.add_argument("--no-weights", action="store_true",
+                        help="Skip loading pretrained weights (use random weights for faster iteration)")
     args = parser.parse_args()
     
     # Configure debug output in tvm_extensions
