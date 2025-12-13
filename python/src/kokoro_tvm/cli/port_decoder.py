@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import os
 
 import torch
 import torch.nn.functional as F
@@ -19,13 +20,61 @@ from kokoro_tvm import tvm_extensions  # noqa: F401
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 
 
+# Target configurations for different platforms
+TARGET_CONFIGS = {
+    "llvm": {
+        "target": "llvm -opt-level=3",
+        "extension": ".so",
+        "description": "CPU (LLVM)",
+    },
+    "metal-macos": {
+        "target_host": "llvm -mtriple=arm64-apple-macos",
+        "target": "metal",
+        "extension": ".dylib",
+        "description": "macOS (Metal GPU + ARM64 CPU)",
+    },
+    "metal-ios": {
+        "target_host": "llvm -mtriple=arm64-apple-ios",
+        "target": "metal",
+        "extension": ".dylib",
+        "description": "iOS (Metal GPU + ARM64 CPU)",
+    },
+}
+
+
+def resolve_target(target_name: str) -> tuple:
+    """Resolve target name to TVM target objects.
+    
+    Returns:
+        Tuple of (target, target_host, extension, description)
+    """
+    if target_name not in TARGET_CONFIGS:
+        raise ValueError(f"Unknown target: {target_name}. Available: {list(TARGET_CONFIGS.keys())}")
+    
+    config = TARGET_CONFIGS[target_name]
+    
+    if "target_host" in config:
+        # Metal targets have separate host target
+        target_host = tvm.target.Target(config["target_host"])
+        target = tvm.target.Target(config["target"], host=target_host)
+    else:
+        # CPU-only targets
+        target = tvm.target.Target(config["target"])
+        target_host = None
+    
+    return target, target_host, config["extension"], config["description"]
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Compile Kokoro Decoder to TVM with static shapes")
     parser.add_argument("--seq-len", type=int, default=150, 
                         help="Static sequence length for compilation (default: 150)")
-    parser.add_argument("--output", type=str, default="decoder_compiled.so",
-                        help="Output path for compiled library (default: decoder_compiled.so)")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output path for compiled library (default: decoder_compiled.<ext>)")
+    parser.add_argument("--target", type=str, default="llvm",
+                        choices=list(TARGET_CONFIGS.keys()),
+                        help=f"Compilation target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output from TVM extensions")
     parser.add_argument("--no-weights", action="store_true",
@@ -36,22 +85,39 @@ def main():
     
     # Configure debug output in extensions
     if args.debug:
-        extensions.DEBUG_ENABLED = True
+        tvm_extensions.DEBUG_ENABLED = True
+    
+    # Resolve target
+    target, target_host, ext, desc = resolve_target(args.target)
+    
+    # Set default output path based on target extension
+    if args.output is None:
+        args.output = f"decoder_compiled{ext}"
+    
+    print(f"Target: {desc}")
     
     # Apply patches
     apply_sinegen_patch()
     
     # Compile decoder
-    compile_decoder(args)
+    compile_decoder(args, target)
     
-    # Run validation if requested
+    # Run validation if requested (only for CPU targets)
     if args.validate:
-        from kokoro_tvm.validation import validate_decoder_against_pytorch
-        validate_decoder_against_pytorch(args.output, args.seq_len)
+        if args.target != "llvm":
+            print("Warning: Validation is only supported for LLVM target. Skipping.")
+        else:
+            from kokoro_tvm.validation import validate_decoder_against_pytorch
+            validate_decoder_against_pytorch(args.output, args.seq_len)
 
 
-def compile_decoder(args):
-    """Compile the Decoder module to TVM."""
+def compile_decoder(args, target):
+    """Compile the Decoder module to TVM.
+    
+    Args:
+        args: CLI arguments
+        target: TVM target object
+    """
     # Initialize Decoder from config
     repo_id = 'hexgrad/Kokoro-82M'
     config_path = hf_hub_download(repo_id=repo_id, filename='config.json')
@@ -156,8 +222,8 @@ def compile_decoder(args):
     print(f"Module has {len(mod.functions)} functions after renaming")
 
     # Compile
-    target = tvm.target.Target("llvm -opt-level=3")
     print(f"Compiling for target: {target}")
+    is_metal = "metal" in str(target).lower()
     
     with target:
         print("Running DecomposeOpsForInference...")
@@ -196,7 +262,28 @@ def compile_decoder(args):
     print(f"Saved compiled library to: {output_path}")
     
     # Quick verification
-    dev = tvm.cpu()
+    # For Metal targets: only run on macOS host for metal-macos, skip iOS
+    import platform
+    is_macos_host = platform.system() == "Darwin"
+    is_ios_target = "ios" in str(target).lower()
+    
+    if is_metal and is_ios_target:
+        print("Skipping verification for iOS target (requires iOS device).")
+        print("Compilation Successful!")
+        return
+    
+    if is_metal and not is_macos_host:
+        print("Skipping verification for Metal target (requires macOS host).")
+        print("Compilation Successful!")
+        return
+    
+    # Select device: Metal GPU for metal-macos on macOS, else CPU
+    if is_metal and is_macos_host:
+        dev = tvm.metal()
+        print("Using Metal device for verification...")
+    else:
+        dev = tvm.cpu()
+    
     vm = relax.VirtualMachine(ex, dev)
     
     test_len = args.seq_len
