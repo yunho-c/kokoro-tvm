@@ -1,3 +1,12 @@
+# SPDX-FileCopyrightText: 2025-present Yunho Cho <opensource@yunhocho.com>
+#
+# SPDX-License-Identifier: Apache-2.0
+"""TVM extensions for ExportedProgramImporter.
+
+This module monkeypatches TVM's ExportedProgramImporter to add support for
+additional PyTorch operators and handle dynamic shapes in Kokoro models.
+"""
+
 import torch
 import tvm
 from tvm import relax

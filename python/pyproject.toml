@@ -29,6 +29,11 @@ Documentation = "https://github.com/yunho-c/kokoro-tvm#readme"
 Issues = "https://github.com/yunho-c/kokoro-tvm/issues"
 Source = "https://github.com/yunho-c/kokoro-tvm"
 
+[project.scripts]
+kokoro-compile = "kokoro_tvm.cli.compile_kokoro:main"
+kokoro-port-decoder = "kokoro_tvm.cli.port_decoder:main"
+
+
 [tool.hatch.version]
 path = "src/kokoro_tvm/__init__.py"
 
