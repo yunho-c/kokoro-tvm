@@ -18,7 +18,7 @@ This occurs specifically with fused functions like:
 ## Environment
 
 - **TVM Version**: main branch (commit hash: `fc2bdfe`)
-- **LLVM Version**: 21.1.6 (also likely affects LLVM 15, 16, 17, 18, 19, 20)
+- **LLVM Version**: 21.1.6 (also likely affects LLVM 15-20)
 - **Operating System**: macOS 15 (also likely affects Linux)
 - **Target**: `llvm -mtriple=arm64-apple-macosx`
 - **Python**: 3.12
@@ -93,39 +93,6 @@ mod = relax.transform.FuseTIR()(mod)
 target = tvm.target.Target("llvm")
 ex = relax.build(mod, target)  # LLVM verification error here
 ```
-
-## Proposed Fix
-
-Add a type check before calling `insertDeclare`:
-
-```cpp
-void CodeGenLLVM::AddDebugInformation(llvm::Value* llvm_value, const Var& tir_var,
-                                      llvm::Instruction* insert_before) {
-  llvm_value->setName(tir_var->name_hint.c_str());
-
-#if TVM_LLVM_VERSION >= 50
-  if (!di_subprogram_) return;
-
-  // LLVM 15+ requires dbg_declare to reference pointer or integer types only
-#if TVM_LLVM_VERSION >= 150
-  if (!llvm_value->getType()->isPointerTy() && 
-      !llvm_value->getType()->isIntegerTy()) {
-    return;  // Cannot attach dbg_declare to float/vector types
-  }
-#endif
-
-  auto dbg_dtype = GetDebugType(GetType(tir_var));
-  // ... rest of function
-#endif
-}
-```
-
-Alternatively, use `insertDbgValueIntrinsic` instead of `insertDeclare` for non-pointer types, as `#dbg_value` does not have the same type restrictions.
-
-## Workarounds
-
-1. **Rebuild TVM with LLVM 14** - avoids the stricter verification
-2. **Rebuild TVM with debug disabled** - `cmake -DCMAKE_BUILD_TYPE=Release` (may not fully work)
 
 ## Triage
 
