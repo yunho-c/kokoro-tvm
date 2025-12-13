@@ -144,6 +144,7 @@ coverage = "*"
 black = ">=23.1.0"
 mypy = ">=1.0.0"
 ruff = ">=0.0.243"
+soundfile = "*"
 
 [tool.pixi.pypi-dependencies]
 apache-tvm-ffi = { path = "../reference/tvm/3rdparty/tvm-ffi", editable = true }

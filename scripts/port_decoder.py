@@ -4,8 +4,8 @@ import os
 import sys
 
 import numpy as np
-
 import operator
+import soundfile as sf
 import torch
 import torch.nn.functional as F
 import tvm
@@ -386,6 +386,24 @@ def validate_against_pytorch(args, target):
         print(f"\n✓ VALIDATION PASSED (MAE < {tolerance}, correlation > 0.999)")
     else:
         print(f"\n✗ VALIDATION FAILED (MAE={mae:.2e}, correlation={correlation:.4f})")
+    
+    # Save audio files for qualitative comparison
+    SAMPLE_RATE = 24000
+    
+    # Squeeze to get 1D audio array: (1, 1, N) -> (N,)
+    pytorch_audio = pytorch_np.squeeze()
+    tvm_audio = tvm_result.squeeze()
+    
+    pytorch_wav = "validation_pytorch.wav"
+    tvm_wav = "validation_tvm.wav"
+    
+    sf.write(pytorch_wav, pytorch_audio, SAMPLE_RATE)
+    sf.write(tvm_wav, tvm_audio, SAMPLE_RATE)
+    
+    print(f"\n📁 Audio files saved for qualitative comparison:")
+    print(f"   - {pytorch_wav} (PyTorch decoder)")
+    print(f"   - {tvm_wav} (TVM decoder)")
+    print(f"   Sample rate: {SAMPLE_RATE} Hz, Duration: {len(pytorch_audio)/SAMPLE_RATE:.2f}s")
     
     print("="*60 + "\n")
 
