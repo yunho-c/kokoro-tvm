@@ -6,13 +6,11 @@ build-backend = "hatchling.build"
 name = "kokoro-tvm"
 dynamic = ["version"]
 description = "Python bindings for Kokoro TVM"
-readme = "README.md"
+readme = "../README.md"
 requires-python = ">=3.8"
 license = "Apache-2.0"
 keywords = []
-authors = [
-  { name = "Yunho Cho", email = "opensource@yunhocho.com" },
-]
+authors = [{ name = "Yunho Cho", email = "opensource@yunhocho.com" }]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
@@ -35,47 +33,24 @@ Source = "https://github.com/yunho-c/kokoro-tvm"
 path = "src/kokoro_tvm/__init__.py"
 
 [tool.hatch.envs.default]
-dependencies = [
-  "coverage[toml]>=6.5",
-  "pytest",
-]
+dependencies = ["coverage[toml]>=6.5", "pytest"]
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
-cov-report = [
-  "- coverage combine",
-  "coverage report",
-]
-cov = [
-  "test-cov",
-  "cov-report",
-]
+cov-report = ["- coverage combine", "coverage report"]
+cov = ["test-cov", "cov-report"]
 
 [[tool.hatch.envs.all.matrix]]
 python = ["3.8", "3.9", "3.10", "3.11", "3.12"]
 
 [tool.hatch.envs.lint]
 detached = true
-dependencies = [
-  "black>=23.1.0",
-  "mypy>=1.0.0",
-  "ruff>=0.0.243",
-]
+dependencies = ["black>=23.1.0", "mypy>=1.0.0", "ruff>=0.0.243"]
 [tool.hatch.envs.lint.scripts]
 typing = "mypy install-types --non-interactive {args:src/kokoro_tvm tests}"
-style = [
-  "ruff check {args:.}",
-  "black --check --diff {args:.}",
-]
-fmt = [
-  "black {args:.}",
-  "ruff check --fix {args:.}",
-  "style",
-]
-all = [
-  "style",
-  "typing",
-]
+style = ["ruff check {args:.}", "black --check --diff {args:.}"]
+fmt = ["black {args:.}", "ruff check --fix {args:.}", "style"]
+all = ["style", "typing"]
 
 [tool.black]
 target-version = ["py38"]
@@ -118,9 +93,15 @@ ignore = [
   # Allow boolean positional values in function calls, like `dict.get(... True)`
   "FBT003",
   # Ignore checks for possible passwords
-  "S105", "S106", "S107",
+  "S105",
+  "S106",
+  "S107",
   # Ignore complexity
-  "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+  "C901",
+  "PLR0911",
+  "PLR0912",
+  "PLR0913",
+  "PLR0915",
 ]
 unfixable = [
   # Don't touch unused imports
@@ -141,17 +122,37 @@ ban-relative-imports = "all"
 source_pkgs = ["kokoro_tvm", "tests"]
 branch = true
 parallel = true
-omit = [
-  "src/kokoro_tvm/__about__.py",
-]
+omit = ["src/kokoro_tvm/__about__.py"]
 
 [tool.coverage.paths]
 kokoro_tvm = ["src/kokoro_tvm", "*/kokoro-tvm/src/kokoro_tvm"]
 tests = ["tests", "*/kokoro-tvm/tests"]
 
 [tool.coverage.report]
-exclude_lines = [
-  "no cov",
-  "if __name__ == .__main__.:",
-  "if TYPE_CHECKING:",
-]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.10.*"
+cmake = ">=3.24"
+cxx-compiler = "*"
+pytest = "*"
+coverage = "*"
+black = ">=23.1.0"
+mypy = ">=1.0.0"
+ruff = ">=0.0.243"
+
+[tool.pixi.pypi-dependencies]
+apache-tvm-ffi = { path = "../reference/tvm/3rdparty/tvm-ffi", editable = true }
+kokoro = { path = "../external/kokoro", editable = true }
+kokoro-tvm = { path = ".", editable = true }
+tvm = { path = "../reference/tvm", editable = true }
+
+[tool.pixi.tasks]
+test = "pytest tests"
+lint = "ruff check ."
+format = "black ."
+typing = "mypy install-types --non-interactive src/kokoro_tvm tests"
