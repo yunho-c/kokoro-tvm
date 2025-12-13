@@ -13,6 +13,7 @@ def validate_decoder_against_pytorch(
     tvm_lib_path: str,
     seq_len: int,
     sample_rate: int = 24000,
+    device: str = "cpu",
 ) -> dict:
     """Validate TVM decoder output against PyTorch decoder using real encoder data.
     
@@ -23,9 +24,10 @@ def validate_decoder_against_pytorch(
     4. Compares outputs numerically
     
     Args:
-        tvm_lib_path: Path to compiled TVM library (.so file)
+        tvm_lib_path: Path to compiled TVM library (.so/.dylib file)
         seq_len: Expected sequence length (must match compilation)
         sample_rate: Audio sample rate for output files
+        device: TVM device to use for inference ("cpu" or "metal")
         
     Returns:
         Dictionary with validation metrics
@@ -116,7 +118,14 @@ def validate_decoder_against_pytorch(
     # Run TVM decoder
     print("\nLoading TVM compiled module...")
     lib = tvm.runtime.load_module(tvm_lib_path)
-    dev = tvm.cpu()
+    
+    # Select TVM device
+    if device == "metal":
+        print("Using Metal device for validation...")
+        dev = tvm.metal()
+    else:
+        dev = tvm.cpu()
+    
     vm = relax.VirtualMachine(lib, dev)
     
     # Prepare TVM inputs

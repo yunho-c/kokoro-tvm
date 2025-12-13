@@ -102,13 +102,20 @@ def main():
     # Compile decoder
     compile_decoder(args, target)
     
-    # Run validation if requested (only for CPU targets)
+    # Run validation if requested
     if args.validate:
-        if args.target != "llvm":
-            print("Warning: Validation is only supported for LLVM target. Skipping.")
-        else:
+        import platform
+        is_macos_host = platform.system() == "Darwin"
+        
+        # Validation supported for: LLVM (CPU) or metal-macos on macOS host
+        if args.target == "llvm":
             from kokoro_tvm.validation import validate_decoder_against_pytorch
             validate_decoder_against_pytorch(args.output, args.seq_len)
+        elif args.target == "metal-macos" and is_macos_host:
+            from kokoro_tvm.validation import validate_decoder_against_pytorch
+            validate_decoder_against_pytorch(args.output, args.seq_len, device="metal")
+        else:
+            print(f"Warning: Validation is not supported for target '{args.target}' on this platform. Skipping.")
 
 
 def compile_decoder(args, target):
@@ -250,6 +257,31 @@ def compile_decoder(args, target):
         print("Running FuseTIR...")
         mod = relax.transform.FuseTIR()(mod)
 
+        # Apply GPU scheduling for Metal targets
+        if is_metal:
+            print("Applying DLight GPU scheduling for Metal...")
+            from tvm import dlight as dl
+            try:
+                # Use specialized rules for better performance
+                # Note: GEMV is excluded due to crash on compound iteration patterns
+                # (KeyError in normalize() for complex spatial indexing like v_yy * 5 + v_ry)
+                mod = dl.ApplyDefaultSchedule(
+                    dl.gpu.Matmul(),           # Optimized tiling + shared memory for matmuls
+                    dl.gpu.Reduction(),        # Parallel reduction trees
+                    dl.gpu.GeneralReduction(), # Multi-axis reductions
+                    dl.gpu.Fallback(),         # Basic parallelization for everything else
+                )(mod)
+                print("DLight scheduling applied (Matmul + Reduction + Fallback).")
+            except Exception as e:
+                print(f"Warning: DLight scheduling failed: {e}")
+                print("Retrying with Fallback only...")
+                try:
+                    mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
+                    print("DLight Fallback scheduling applied.")
+                except Exception as e2:
+                    print(f"Warning: DLight Fallback also failed: {e2}")
+                    print("Continuing without DLight scheduling...")
+
     # Build with debug info disabled to avoid LLVM verification bug
     print("Building with standard Relax pipeline (debug info disabled)...")
     with tvm.transform.PassContext(opt_level=3, config={"tir.enable_debug": False}):
@@ -279,8 +311,17 @@ def compile_decoder(args, target):
     
     # Select device: Metal GPU for metal-macos on macOS, else CPU
     if is_metal and is_macos_host:
-        dev = tvm.metal()
-        print("Using Metal device for verification...")
+        # Check if Metal runtime is available
+        try:
+            dev = tvm.metal()
+            # Try to check if the device is actually usable
+            _ = dev.exist
+            print("Using Metal device for verification...")
+        except Exception as e:
+            print(f"Metal runtime not available: {e}")
+            print("Skipping verification (Metal runtime not enabled in TVM build).")
+            print("Compilation Successful!")
+            return
     else:
         dev = tvm.cpu()
     
