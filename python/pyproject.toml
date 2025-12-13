@@ -131,22 +131,25 @@ tests = ["tests", "*/kokoro-tvm/tests"]
 [tool.coverage.report]
 exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
 
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
 python = "3.10.*"
 cmake = ">=3.24"
-cxx-compiler = "*"
 pytest = "*"
 coverage = "*"
 black = ">=23.1.0"
 mypy = ">=1.0.0"
 ruff = ">=0.0.243"
-soundfile = "*"
+
+# Linux may need cxx-compiler from conda; macOS uses system AppleClang
+[tool.pixi.target.linux-64.dependencies]
+cxx-compiler = "*"
 
 [tool.pixi.pypi-dependencies]
+soundfile = "*"
 apache-tvm-ffi = { path = "../reference/tvm/3rdparty/tvm-ffi", editable = true }
 kokoro = { path = "../external/kokoro", editable = true }
 kokoro-tvm = { path = ".", editable = true }
@@ -157,3 +160,4 @@ test = "pytest tests"
 lint = "ruff check ."
 format = "black ."
 typing = "mypy install-types --non-interactive src/kokoro_tvm tests"
+install-macos = { cmd = "pixi install", env = { CC = "/usr/bin/clang", CXX = "/usr/bin/clang++" } } # NOTE: doesn't work, `even though CC=/usr/bin/clang CXX=/usr/bin/clang++ pixi install` works
