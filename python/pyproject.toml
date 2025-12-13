@@ -32,6 +32,8 @@ Source = "https://github.com/yunho-c/kokoro-tvm"
 [project.scripts]
 kokoro-compile = "kokoro_tvm.cli.compile_kokoro:main"
 kokoro-port-decoder = "kokoro_tvm.cli.port_decoder:main"
+kokoro-tune = "kokoro_tvm.cli.tune:main"
+kokoro-profile = "kokoro_tvm.cli.profile:main"
 
 
 [tool.hatch.version]

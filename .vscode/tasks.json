@@ -78,6 +78,33 @@
                 "cwd": "${workspaceFolder}/python"
             },
             "problemMatcher": []
+        },
+        {
+            "label": "Port Decoder with Tuning",
+            "type": "shell",
+            "command": "pixi run kokoro-port-decoder --seq-len 150 --tune --tune-trials 500",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Tune Decoder (Standalone)",
+            "type": "shell",
+            "command": "pixi run kokoro-tune --seq-len 150 --max-trials 2000",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Profile Decoder",
+            "type": "shell",
+            "command": "pixi run kokoro-profile decoder_compiled.so --repeat 50",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
         }
     ]
 }

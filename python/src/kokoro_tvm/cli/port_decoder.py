@@ -81,6 +81,15 @@ def main():
                         help="Skip loading pretrained weights (use random weights for faster iteration)")
     parser.add_argument("--validate", action="store_true",
                         help="Validate TVM output against PyTorch using real encoder data")
+    
+    # Tuning arguments
+    parser.add_argument("--tune", action="store_true",
+                        help="Auto-tune with MetaSchedule before building")
+    parser.add_argument("--tune-trials", type=int, default=2000,
+                        help="Maximum tuning trials (default: 2000)")
+    parser.add_argument("--tune-dir", type=str, default="tuning_logs",
+                        help="Directory for tuning artifacts (default: tuning_logs)")
+    
     args = parser.parse_args()
     
     # Configure debug output in extensions
@@ -244,6 +253,21 @@ def compile_decoder(args, target):
         with open("decoder_legalized.py", "w") as f: 
             f.write(mod.script())
         print("Dumped decoder_legalized.py")
+        
+        # Auto-tune with MetaSchedule if requested
+        if args.tune:
+            print(f"\nStarting MetaSchedule tuning (max_trials={args.tune_trials})...")
+            print(f"Tuning logs will be saved to: {args.tune_dir}")
+            mod = relax.transform.MetaScheduleTuneTIR(
+                work_dir=args.tune_dir,
+                max_trials_global=args.tune_trials,
+            )(mod)
+            print("Tuning complete! Applying best schedules...")
+            mod = relax.transform.MetaScheduleApplyDatabase(
+                work_dir=args.tune_dir,
+                enable_warning=True,
+            )(mod)
+            print("Best schedules applied.")
 
         print("Running AnnotateTIROpPattern...")
         mod = relax.transform.AnnotateTIROpPattern()(mod)
