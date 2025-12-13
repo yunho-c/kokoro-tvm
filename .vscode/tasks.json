@@ -37,7 +37,46 @@
         {
             "label": "Compile Kokoro (PyTorch) with TVM",
             "type": "shell",
-            "command": "python scripts/compile_kokoro.py",
+            "command": "pixi run kokoro-compile",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Port Decoder to TVM",
+            "type": "shell",
+            "command": "pixi run kokoro-port-decoder --seq-len 150",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Port Decoder to TVM (with validation)",
+            "type": "shell",
+            "command": "pixi run kokoro-port-decoder --seq-len 150 --validate",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Port Decoder to TVM (macOS Metal)",
+            "type": "shell",
+            "command": "pixi run kokoro-port-decoder --target metal-macos --seq-len 150 --output decoder_macos.dylib",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Port Decoder to TVM (iOS Metal)",
+            "type": "shell",
+            "command": "pixi run kokoro-port-decoder --target metal-ios --seq-len 150 --output decoder_ios.dylib",
+            "options": {
+                "cwd": "${workspaceFolder}/python"
+            },
             "problemMatcher": []
         }
     ]
