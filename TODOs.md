@@ -19,3 +19,10 @@ Prioritized from low-level building blocks to high-level modules.
 - [x] **CustomAlbert** (`kokoro.modules`)
     - Role: ALBERT transformer (High Complexity).
     - Status: Verified (`experiments/albert_import.py`). Required upstream TVM fix for boolean max/min.
+
+## Package Integration
+
+- [x] **Encoder Integration**
+    - Created `models/encoder.py`, `patches/lstm.py`, and `cli/port_encoder.py`.
+    - Refactored target config to `config.py`.
+    - Verified compilation of all encoder components.

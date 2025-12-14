@@ -21,7 +21,7 @@ from kokoro_tvm.patches import (
     apply_all_module_patches,
     apply_sinegen_patch,
 )
-from kokoro_tvm.patches.lstm import register_kokoro_lstm_op, apply_lstm_forward_patch
+from kokoro_tvm.patches.lstm import apply_lstm_patch
 
 
 def compile_kokoro(model, output_dir: str):
@@ -53,8 +53,7 @@ def compile_kokoro(model, output_dir: str):
 
     # Apply all patches
     apply_sinegen_patch()
-    register_kokoro_lstm_op()
-    apply_lstm_forward_patch()
+    apply_lstm_patch()
     apply_all_module_patches()
 
     # Export the program
@@ -113,7 +112,20 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading model...")
-    kmodel = KModel(config=args.config_file, model=args.checkpoint_path, disable_complex=True)
+    config = args.config_file
+    checkpoint = args.checkpoint_path
+    
+    if not config or not checkpoint:
+        from huggingface_hub import hf_hub_download
+        repo_id = 'hexgrad/Kokoro-82M'
+        if not config:
+            print(f"Downloading config from {repo_id}...")
+            config = hf_hub_download(repo_id=repo_id, filename='config.json')
+        if not checkpoint:
+            print(f"Downloading weights from {repo_id}...")
+            checkpoint = hf_hub_download(repo_id=repo_id, filename='kokoro-v1_0.pth')
+            
+    kmodel = KModel(config=config, model=checkpoint, disable_complex=True)
     model = KModelForONNX(kmodel).eval()
 
     compile_kokoro(model, args.output_dir)
