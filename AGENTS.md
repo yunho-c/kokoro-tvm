@@ -2,22 +2,22 @@
 
 ## Python Environment
 
-**Always use the pixi Python environment** for running scripts in this project:
+**Always use `py -3.12`** for running scripts in this project:
 
 ```bash
-./python/.pixi/envs/default/bin/python <script>
+py -3.12 <script>
 ```
 
-This environment has TVM and all required dependencies properly configured.
+This provides access to TVM and all required dependencies.
 
 ### Example Usage
 
 ```bash
 # Compile the decoder
-./python/.pixi/envs/default/bin/python scripts/port_decoder.py --seq-len 150
+py -3.12 scripts/port_decoder.py --seq-len 150
 
 # Run other scripts
-./python/.pixi/envs/default/bin/python scripts/compile_kokoro.py
+py -3.12 scripts/compile_kokoro.py
 ```
 
 ## Project Structure
