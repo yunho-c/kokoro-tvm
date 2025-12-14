@@ -21,7 +21,7 @@ from kokoro_tvm.patches import (
     apply_all_module_patches,
     apply_sinegen_patch,
 )
-from kokoro_tvm.patches.lstm import register_kokoro_lstm_op, apply_lstm_forward_patch
+from kokoro_tvm.patches.lstm import apply_lstm_patch
 
 
 def compile_kokoro(model, output_dir: str):
@@ -53,8 +53,7 @@ def compile_kokoro(model, output_dir: str):
 
     # Apply all patches
     apply_sinegen_patch()
-    register_kokoro_lstm_op()
-    apply_lstm_forward_patch()
+    apply_lstm_patch()
     apply_all_module_patches()
 
     # Export the program

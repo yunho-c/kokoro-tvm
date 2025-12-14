@@ -17,49 +17,8 @@ from kokoro_tvm import tvm_extensions  # noqa: F401
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 
 
-# Target configurations for different platforms
-TARGET_CONFIGS = {
-    "llvm": {
-        "target": "llvm -opt-level=3",
-        "extension": ".so",
-        "description": "CPU (LLVM)",
-    },
-    "metal-macos": {
-        "target_host": "llvm -mtriple=arm64-apple-macos",
-        "target": "metal",
-        "extension": ".dylib",
-        "description": "macOS (Metal GPU + ARM64 CPU)",
-    },
-    "metal-ios": {
-        "target_host": "llvm -mtriple=arm64-apple-ios",
-        "target": "metal",
-        "extension": ".dylib",
-        "description": "iOS (Metal GPU + ARM64 CPU)",
-    },
-}
-
-
-def resolve_target(target_name: str) -> tuple:
-    """Resolve target name to TVM target objects.
-    
-    Returns:
-        Tuple of (target, target_host, extension, description)
-    """
-    if target_name not in TARGET_CONFIGS:
-        raise ValueError(f"Unknown target: {target_name}. Available: {list(TARGET_CONFIGS.keys())}")
-    
-    config = TARGET_CONFIGS[target_name]
-    
-    if "target_host" in config:
-        # Metal targets have separate host target
-        target_host = tvm.target.Target(config["target_host"])
-        target = tvm.target.Target(config["target"], host=target_host)
-    else:
-        # CPU-only targets
-        target = tvm.target.Target(config["target"])
-        target_host = None
-    
-    return target, target_host, config["extension"], config["description"]
+# Target configurations and resolver imported from shared config
+from kokoro_tvm.config import TARGET_CONFIGS, resolve_target
 
 
 def main():
