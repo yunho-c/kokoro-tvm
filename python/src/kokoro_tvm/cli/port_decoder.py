@@ -8,12 +8,9 @@ import json
 import os
 
 import torch
-import torch.nn.functional as F
 import tvm
 from tvm import relax
-from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
-from huggingface_hub import hf_hub_download
-from kokoro.istftnet import Decoder, SineGen
+
 
 # Import extensions (applies TVM patches on import)
 from kokoro_tvm import tvm_extensions  # noqa: F401
@@ -134,108 +131,21 @@ def compile_decoder(args, target):
         args: CLI arguments
         target: TVM target object
     """
-    # Initialize Decoder from config
-    repo_id = 'hexgrad/Kokoro-82M'
-    config_path = hf_hub_download(repo_id=repo_id, filename='config.json')
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-
+    from kokoro_tvm.models import create_decoder_module
+    from kokoro_tvm.models.decoder import get_decoder_config
+    
+    # Create Relax module using shared function
+    mod = create_decoder_module(
+        seq_len=args.seq_len,
+        load_weights=not args.no_weights,
+        func_name="decoder_forward",
+        dump_ir="decoder_before_opt.py",
+    )
+    
+    # Get config for verification later
+    config = get_decoder_config()
     hidden_dim = config['hidden_dim']
     style_dim = config['style_dim']
-    n_mels = config['n_mels']
-    istftnet_params = config['istftnet']
-    
-    decoder = Decoder(
-        dim_in=hidden_dim,
-        style_dim=style_dim,
-        dim_out=n_mels,
-        disable_complex=True,
-        **istftnet_params
-    )
-    
-    # Load pretrained weights (unless --no-weights is specified)
-    if not args.no_weights:
-        model_filename = 'kokoro-v1_0.pth'
-        print(f"Downloading pretrained weights: {model_filename}...")
-        model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
-        
-        print(f"Loading decoder weights from {model_path}...")
-        state_dicts = torch.load(model_path, map_location='cpu', weights_only=True)
-        
-        if 'decoder' in state_dicts:
-            decoder_state_dict = state_dicts['decoder']
-            first_key = next(iter(decoder_state_dict.keys()), '')
-            if first_key.startswith('module.'):
-                print("Stripping 'module.' prefix from weight keys...")
-                decoder_state_dict = {k[7:]: v for k, v in decoder_state_dict.items()}
-            decoder.load_state_dict(decoder_state_dict, strict=False)
-            print("Successfully loaded pretrained decoder weights!")
-        else:
-            print(f"Warning: 'decoder' key not found in checkpoint. Using random weights.")
-    else:
-        print("Skipping weight loading (--no-weights specified). Using random weights.")
-    
-    decoder.eval()
-
-    # Prepare inputs with STATIC shapes
-    batch_size = 1
-    seq_len = args.seq_len
-    
-    asr = torch.randn(batch_size, hidden_dim, seq_len)
-    f0 = torch.randn(batch_size, seq_len * 2)
-    n = torch.randn(batch_size, seq_len * 2)
-    s = torch.randn(batch_size, style_dim)
-    
-    print(f"Static inputs: asr={asr.shape}, f0={f0.shape}, n={n.shape}, s={s.shape}")
-
-    # Export with STATIC shapes
-    print(f"Exporting model with static seq_len={seq_len}...")
-    exported_program = torch.export.export(
-        decoder,
-        (asr, f0, n, s),
-    )
-    
-    # Compile with TVM
-    print("Importing into TVM Relax...")
-    
-    print("Running decompositions explicitly...")
-    try:
-        exported_program = exported_program.run_decompositions()
-        print("Decompositions done.")
-    except Exception as e:
-        print(f"Warning: run_decompositions failed: {e}. Attempting import anyway.")
-
-    importer = ExportedProgramImporter()
-    mod = importer.from_exported_program(
-        exported_program, 
-        keep_params_as_input=False,
-        unwrap_unit_return_tuple=False, 
-        no_bind_return_tuple=False
-    )
-    
-    print("Relax Module created.")
-    
-    # Dump intermediate IR for debugging
-    with open("decoder_before_opt.py", "w") as f:
-        f.write(mod.script())
-    print("Dumped decoder_before_opt.py")
-    
-    # Rename 'main' to 'decoder_forward'
-    new_funcs = {}
-    for gv, func in mod.functions.items():
-        if gv.name_hint == "main":
-            new_gv = tvm.ir.GlobalVar("decoder_forward")
-            if hasattr(func, "attrs") and func.attrs is not None and "global_symbol" in func.attrs:
-                new_attrs = dict(func.attrs)
-                new_attrs["global_symbol"] = "decoder_forward"
-                func = func.with_attrs(new_attrs)
-                print(f"Updated function global_symbol attribute to 'decoder_forward'")
-            new_funcs[new_gv] = func
-            print(f"Renamed function 'main' to 'decoder_forward'")
-        else:
-            new_funcs[gv] = func
-    mod = tvm.IRModule(new_funcs, attrs=mod.attrs)
-    print(f"Module has {len(mod.functions)} functions after renaming")
 
     # Compile
     print(f"Compiling for target: {target}")
