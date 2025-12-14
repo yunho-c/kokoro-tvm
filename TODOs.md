@@ -10,12 +10,12 @@ Prioritized from low-level building blocks to high-level modules.
 - [x] **DurationEncoder** (`kokoro.modules`)
     - Role: LSTM-based duration encoding.
     - Status: Verified (`experiments/duration_encoder_import.py`). Requires `tvm_extensions` and packed sequence monkeypatching.
-- [ ] **TextEncoder** (`kokoro.modules`)
+- [x] **TextEncoder** (`kokoro.modules`)
     - Role: Main text encoder with CNNs and LSTMs.
-    - Status: Pending. Valid next step.
-- [ ] **ProsodyPredictor** (`kokoro.modules`)
+    - Status: Verified (`experiments/text_encoder_import.py`)
+- [x] **ProsodyPredictor** (`kokoro.modules`)
     - Role: Predicts duration, F0, N. Contains LSTMs and AdainResBlk1d.
-    - Status: Pending
-- [ ] **CustomAlbert** (`kokoro.modules`)
+    - Status: Verified (`experiments/prosody_import.py`). Required tuple unpacking fix.
+- [x] **CustomAlbert** (`kokoro.modules`)
     - Role: ALBERT transformer (High Complexity).
-    - Status: Pending
+    - Status: Verified (`experiments/albert_import.py`). Required upstream TVM fix for boolean max/min.
