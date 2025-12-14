@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import tvm
 from tvm import relax
+from tvm.runtime import Tensor
 
 
 @dataclass
@@ -56,7 +57,7 @@ def get_device(target_str: str) -> tvm.runtime.Device:
 def benchmark_inference(
     vm: relax.VirtualMachine,
     func_name: str,
-    inputs: List[tvm.nd.NDArray],
+    inputs: List[Tensor],
     warmup: int = 5,
     repeat: int = 20,
 ) -> BenchmarkResult:
@@ -137,10 +138,10 @@ def benchmark_module(
     
     # Create synthetic inputs matching decoder signature
     inputs = [
-        tvm.nd.array(np.random.randn(1, hidden_dim, seq_len).astype("float32"), dev),
-        tvm.nd.array(np.random.randn(1, seq_len * 2).astype("float32"), dev),
-        tvm.nd.array(np.random.randn(1, seq_len * 2).astype("float32"), dev),
-        tvm.nd.array(np.random.randn(1, style_dim).astype("float32"), dev),
+        tvm.runtime.tensor(np.random.randn(1, hidden_dim, seq_len).astype("float32"), device=dev),
+        tvm.runtime.tensor(np.random.randn(1, seq_len * 2).astype("float32"), device=dev),
+        tvm.runtime.tensor(np.random.randn(1, seq_len * 2).astype("float32"), device=dev),
+        tvm.runtime.tensor(np.random.randn(1, style_dim).astype("float32"), device=dev),
     ]
     
     return benchmark_inference(vm, func_name, inputs, warmup, repeat)
