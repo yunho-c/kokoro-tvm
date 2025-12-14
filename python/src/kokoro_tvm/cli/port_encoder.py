@@ -127,7 +127,7 @@ def validate_component(name, ex, args, target):
         inputs.append(tvm.runtime.tensor(torch.randn(1, 512, args.seq_len).numpy().astype("float32"), device=dev))
         inputs.append(tvm.runtime.tensor(torch.randn(1, 64).numpy().astype("float32"), device=dev))
         inputs.append(tvm.runtime.tensor(np.array([args.seq_len], dtype=np.int64), device=dev))
-        inputs.append(tvm.runtime.tensor(torch.randn(1, args.seq_len, args.seq_len*2).numpy().astype("float32"), device=dev))
+        inputs.append(tvm.runtime.tensor(torch.randn(1, args.seq_len, args.seq_len*10).numpy().astype("float32"), device=dev))
         inputs.append(tvm.runtime.tensor(np.zeros((1, args.seq_len), dtype=bool), device=dev))
 
     elif name == "text_encoder":

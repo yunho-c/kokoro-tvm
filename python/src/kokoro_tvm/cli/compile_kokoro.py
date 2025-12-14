@@ -112,7 +112,20 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading model...")
-    kmodel = KModel(config=args.config_file, model=args.checkpoint_path, disable_complex=True)
+    config = args.config_file
+    checkpoint = args.checkpoint_path
+    
+    if not config or not checkpoint:
+        from huggingface_hub import hf_hub_download
+        repo_id = 'hexgrad/Kokoro-82M'
+        if not config:
+            print(f"Downloading config from {repo_id}...")
+            config = hf_hub_download(repo_id=repo_id, filename='config.json')
+        if not checkpoint:
+            print(f"Downloading weights from {repo_id}...")
+            checkpoint = hf_hub_download(repo_id=repo_id, filename='kokoro-v1_0.pth')
+            
+    kmodel = KModel(config=config, model=checkpoint, disable_complex=True)
     model = KModelForONNX(kmodel).eval()
 
     compile_kokoro(model, args.output_dir)

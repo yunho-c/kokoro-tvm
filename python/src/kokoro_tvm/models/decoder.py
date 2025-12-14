@@ -125,8 +125,9 @@ def create_decoder_module(
 
     # Import to TVM Relax
     print("Importing into TVM Relax...")
-    importer = ExportedProgramImporter()
-    mod = importer.from_exported_program(
+    print("Importing into TVM Relax...")
+    from tvm.relax.frontend.torch import from_exported_program
+    mod = from_exported_program(
         exported_program, 
         keep_params_as_input=False,
         unwrap_unit_return_tuple=False, 

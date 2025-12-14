@@ -74,52 +74,37 @@ def _export_and_import(
 
 
 def create_bert_module(
-    vocab_size: int = 100, # Mock/Testing defaults, should be from config
+    vocab_size: int = 100,
     dump_ir: Optional[str] = None
 ) -> tvm.IRModule:
-    """Create Relax IRModule for CustomAlbert (Text processing)."""
-    
-    # Apply patches (though Albert usually doesn't need LSTM patch, harmless)
+    """Create Relax IRModule for CustomAlbert with Linear projection."""
     
     print("Initializing CustomAlbert...")
-    # NOTE: In real usage we should load config from HF. 
-    # For now, we reuse the config structure or defaults if feasible.
-    # But Kokoro uses a specific AlbertConfig.
-    # We will fetch it from 'hexgrad/Kokoro-82M' config.json if possible, 
-    # but the config.json there is for the custom assembly, not raw AlbertConfig.
-    # Actually, CustomAlbert in kokoro/modules.py seems to take a standard AlbertConfig?
-    # No, it inherits from AlbertModel.
-    # We should stick to what `kokoro.model.KModel` does.
-    # KModel: self.bert = CustomAlbert(base_model.config) where base_model is loaded via transformers?
-    # "bert = load_model(bert_path)" ?
-    # Let's use a standard config for portability or use values from model config if available.
-    # For now, let's use the parameters compatible with Kokoro-82M.
-    
-    # Assuming standard albert-base-v2 or similar?
-    # Kokoro-82M uses a specific style.
-    # Let's load the model config parameters if we can.
-    
-    # For simplicity in this porting step, we use explicit params matching known Kokoro sizes if known,
-    # or rely on load_weights logic.
-    # But to create the *structure* for compilation, we need the config.
-    
-    # We'll use a standard config for now suitable for 82M logic or mock it.
-    # Let's use inputs compatible with experiments/albert_import.py
     
     config = AlbertConfig(
-        vocab_size=30000, # Approx for english/multi
+        vocab_size=30000,
         hidden_size=768,
         num_hidden_layers=12,
         num_attention_heads=12,
         intermediate_size=3072,
     )
     
-    model = CustomAlbert(config)
+    class BertWrapper(torch.nn.Module):
+        """Wraps CustomAlbert + Linear projection to match KModel structure."""
+        def __init__(self, config):
+            super().__init__()
+            self.bert = CustomAlbert(config)
+            self.bert_encoder = torch.nn.Linear(config.hidden_size, 512)
+            
+        def forward(self, input_ids, attention_mask):
+            bert_dur = self.bert(input_ids, attention_mask=attention_mask)
+            return self.bert_encoder(bert_dur).transpose(-1, -2)
+
+    model = BertWrapper(config)
     model.eval()
     
-    # Static Inputs
     BATCH_SIZE = 1
-    SEQ_LEN = 50 # Example static length
+    SEQ_LEN = 512
     input_ids = torch.randint(0, 30000, (BATCH_SIZE, SEQ_LEN), dtype=torch.long)
     attention_mask = torch.ones((BATCH_SIZE, SEQ_LEN), dtype=torch.long)
     
@@ -132,7 +117,7 @@ def create_predictor_module(
     nlayers: int = 8,
     max_dur: int = 50,
     dropout: float = 0.1,
-    seq_len: int = 50,
+    seq_len: int = 512,
     dump_ir: Optional[str] = None
 ) -> tvm.IRModule:
     """Create Relax IRModule for ProsodyPredictor."""
@@ -145,25 +130,18 @@ def create_predictor_module(
         d_hid=d_hid, 
         nlayers=nlayers, 
         max_dur=max_dur, 
-        dropout=0.0 # Deterministic
+        dropout=0.0
     )
     model.eval()
-    
+
     # Static Inputs
     BATCH_SIZE = 1
-    # Note: Prosody uses TextEncoder output which has dim d_hid (if using same as DurationEncoder?)
-    # or d_model?
-    # In Kokoro-82M config: `predictor_params` usually has d_hid.
-    
     input_texts = torch.randn(BATCH_SIZE, d_hid, seq_len)
     input_style = torch.randn(BATCH_SIZE, style_dim)
     input_lengths = torch.tensor([seq_len] * BATCH_SIZE, dtype=torch.long)
-    
-    # Alignment: mapping text seq_len to audio frames.
-    # Let's assume audio frames = seq_len * 2 for dummy.
-    aligned_len = seq_len * 2
+
+    aligned_len = seq_len * 10
     input_alignment = torch.randn(BATCH_SIZE, seq_len, aligned_len)
-    
     input_m = torch.zeros(BATCH_SIZE, seq_len, dtype=torch.bool)
     
     return _export_and_import(
