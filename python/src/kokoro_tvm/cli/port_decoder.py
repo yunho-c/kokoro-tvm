@@ -11,13 +11,8 @@ import torch
 import tvm
 from tvm import relax
 
-
-# Import extensions (applies TVM patches on import)
-from kokoro_tvm import tvm_extensions  # noqa: F401
+from kokoro_tvm import tvm_extensions  # applies TVM patches on import # noqa: F401
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
-
-
-# Target configurations and resolver imported from shared config
 from kokoro_tvm.config import TARGET_CONFIGS, resolve_target
 
 
