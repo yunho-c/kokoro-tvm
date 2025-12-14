@@ -118,3 +118,99 @@ For **Kokoro TVM**:
 > **TVM's LSTM support unrolls at graph construction time, not runtime.**
 > 
 > The `for t in time_steps:` Python loop in the importer creates explicit IR nodes per timestep. To avoid this, implement iteration at the IR level (TIR loops or Relax recursion), not at the Python meta-level.
+
+---
+
+## Implementation Results
+
+### Failed Approaches
+
+#### 1. TVMScript @T.prim_func with T.serial loop ❌
+**Error**: `Well-formedness check failed: Loop iterator var t is defined outside of any block, but is used inside the non-opaque current block`
+
+```python
+@T.prim_func
+def lstm_forward(...):
+    for t in T.serial(seq_len):
+        for b, g in T.grid(batch, gates):
+            with T.block("gates"):
+                # Error: can't use `t` here!
+                gates[vb, vg] = x[t, vb, k] * Wi[vg, k]
+```
+
+**Why it failed**: TVM's block well-formedness rules forbid using outer loop variables inside non-opaque blocks.
+
+#### 2. TVMScript IRBuilder with T.While ❌
+**Error**: `'Buffer' object does not support item assignment`
+
+```python
+with IRBuilder() as ib:
+    h = T.alloc_buffer(...)
+    with T.While(t < seq_len):
+        h[b, j] = h_init[b, j]  # Error!
+```
+
+**Why it failed**: IRBuilder context uses different syntax - requires `T.buffer_store()` instead of direct indexing.
+
+#### 3. TIR with decl_buffer and custom data variable ❌
+**Error**: `Variable h_data is not a pointer`
+
+```python
+h_data = tir.Var("h_data", "handle")  # Wrong type!
+h_buf = tir.decl_buffer(..., data=h_data)
+```
+
+**Why it failed**: Buffer data variables need proper pointer type annotation.
+
+### TIR LSTM with While Loop ✅
+
+Successfully implemented a non-unrolled LSTM using `tir.ir_builder.while_loop()`:
+
+```python
+# Generated TIR (excerpt):
+t_1[0] = 0
+while t_1[0] < 8:
+    # ... LSTM gate computation ...
+    # ... State updates ...
+    t_1[0] = t_1[0] + 1
+```
+
+**Results:**
+| Metric | Value |
+|--------|-------|
+| IR Lines | **42** (O(1) regardless of seq_len) |
+| Build | ✅ LLVM successful |
+| Execution | ✅ Works |
+
+Compare: Unrolled TOPI version generates **11,500+ lines** for seq_len=64.
+
+### Files Implemented
+
+| File | Purpose |
+|------|---------|
+| `python/src/kokoro_tvm/ops/__init__.py` | Ops module |
+| `python/src/kokoro_tvm/ops/lstm.py` | Configurable LSTM handler |
+| `python/src/kokoro_tvm/ops/tir_lstm.py` | **TIR LSTM with While loop** |
+| `experiments/lstm/relax_lstm_full.py` | Relax recursive prototype |
+
+### Key Technical Learnings
+
+1. **TVMScript block well-formedness**: Blocks can't access outer loop variables in non-opaque mode
+2. **`tir.ir_builder`** bypasses block restrictions and supports `while_loop()`
+3. **Integration pattern**: Use `bb.add_func()` + `relax.call_tir(gvar, args, out_sinfo)`
+
+### Usage
+
+```python
+from kokoro_tvm.ops.tir_lstm import create_tir_lstm_primfunc
+
+# Create TIR function
+tir_func = create_tir_lstm_primfunc(seq_len, batch, input_size, hidden_size)
+
+# Add to module and call via call_tir
+tir_gv = block_builder.add_func(tir_func, "tir_lstm")
+output = block_builder.emit(
+    relax.call_tir(tir_gv, [x, h0, c0, Wi, Wh, bi, bh], out_sinfo=[...])
+)
+```
+
