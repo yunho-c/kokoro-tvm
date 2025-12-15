@@ -190,6 +190,9 @@ def create_f0n_module(
     predictor = ProsodyPredictor(style_dim=style_dim, d_hid=d_hid, nlayers=nlayers, max_dur=max_dur, dropout=0.0)
     predictor.eval()
 
+    # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
+    apply_lstm_custom_op_patch(predictor)
+
     class F0NWrapper(torch.nn.Module):
         """Wraps the F0Ntrain path of ProsodyPredictor."""
 
@@ -244,6 +247,9 @@ def create_text_encoder_module(
     print("Initializing TextEncoder...")
     model = TextEncoder(channels=channels, kernel_size=kernel_size, depth=depth, n_symbols=n_symbols)
     model.eval()
+
+    # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
+    apply_lstm_custom_op_patch(model)
 
     # Static Inputs
     BATCH_SIZE = 1
