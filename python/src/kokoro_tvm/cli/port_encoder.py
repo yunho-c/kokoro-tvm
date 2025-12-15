@@ -31,8 +31,29 @@ def main():
         "--target", type=str, default="llvm", choices=["llvm", "metal-macos", "metal-ios"], help="Compilation target"
     )
     parser.add_argument("--validate", action="store_true", help="Run basic execution check after compilation")
+    parser.add_argument(
+        "--lstm-method",
+        type=str,
+        default="topi",
+        choices=["tir", "relax", "topi"],
+        help="LSTM implementation: tir (non-unrolled, O(1) IR), relax (unrolled), topi (original)",
+    )
 
     args = parser.parse_args()
+
+    # Configure LSTM method
+    if args.lstm_method == "tir":
+        tvm_extensions.USE_TIR_LSTM = True
+        tvm_extensions.USE_RELAX_LSTM = False
+        print("Using TIR LSTM (non-unrolled, O(1) IR size)")
+    elif args.lstm_method == "relax":
+        tvm_extensions.USE_TIR_LSTM = False
+        tvm_extensions.USE_RELAX_LSTM = True
+        print("Using Relax LSTM (unrolled)")
+    else:
+        tvm_extensions.USE_TIR_LSTM = False
+        tvm_extensions.USE_RELAX_LSTM = False
+        print("Using TOPI LSTM (original)")
 
     os.makedirs(args.output_dir, exist_ok=True)
 

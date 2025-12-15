@@ -12,10 +12,12 @@ from kokoro_tvm.patches.modules import (
     apply_adain_patch,
     apply_all_module_patches,
 )
+from kokoro_tvm.ops.lstm_custom_op import patch_lstm_modules as apply_lstm_custom_op_patch
 
 __all__ = [
     "apply_sinegen_patch",
     "apply_lstm_patch",
+    "apply_lstm_custom_op_patch",
     "apply_text_encoder_patch",
     "apply_prosody_predictor_patch",
     "apply_duration_encoder_patch",

@@ -34,9 +34,16 @@ def new_create_convert_map(self):
 
     # Add custom converters
     custom_map = {
-        "kokoro.lstm.default": self._lstm,  # Reuse existing LSTM implementation
-        "kokoro.lstm.default": self._lstm,  # Reuse existing LSTM implementation
-        "lstm.default": self._lstm,  # Alias for custom op if name matches
+        # LSTM handlers - our custom op and standard PyTorch LSTM
+        # Custom ops may appear with or without namespace prefix depending on TVM version
+        "kokoro.lstm_forward.default": self._lstm,  # Unidirectional (with namespace)
+        "lstm_forward.default": self._lstm,  # Unidirectional (without namespace)
+        "kokoro.lstm_forward_bidirectional.default": self._lstm,  # Bidirectional (with namespace)
+        "lstm_forward_bidirectional.default": self._lstm,  # Bidirectional (without namespace)
+        "lstm.input": self._lstm,  # Standard PyTorch LSTM (overrides upstream)
+        "kokoro.lstm.default": self._lstm,  # Legacy custom op
+        "lstm.default": self._lstm,  # Alias
+        "aten.lstm.input": self._lstm,  # Fallback
         # Missing ops
         "atan2.default": self._atan2,
         "_assert_scalar.default": lambda node: None,  # Ignore assertions
@@ -114,6 +121,11 @@ def new_create_convert_map(self):
     )
 
     convert_map.update(custom_map)
+
+    # Debug: verify LSTM override is registered
+    if "lstm.input" in convert_map:
+        print(f"[DEBUG] lstm.input handler registered: {convert_map['lstm.input']}")
+
     return convert_map
 
 
@@ -560,8 +572,11 @@ ExportedProgramImporter._expand = _expand
 
 
 # LSTM Implementation Configuration
-# Set to True to use Relax-based unrolled LSTM (same behavior but cleaner code path)
-# Set to False to use TOPI emit_te LSTM (original behavior)
+# Options:
+#   USE_TIR_LSTM = True  -> TIR PrimFunc with while loop (O(1) IR size, recommended)
+#   USE_RELAX_LSTM = True -> Relax ops (still unrolled but cleaner code)
+#   Both False -> TOPI emit_te (original, causes IR explosion)
+USE_TIR_LSTM = False  # Non-unrolled TIR LSTM with while loop
 USE_RELAX_LSTM = False  # Default to original for backward compatibility
 
 
@@ -571,6 +586,7 @@ def _lstm_topi(self, node):
     This uses tvm.topi.nn.lstm via emit_te, which causes IR explosion
     for long sequences because the te.scan gets materialized.
     """
+    print("invoked (_lstm_topi)")  # DEBUG
     import tvm.topi.nn
 
     args = self.retrieve_args(node)
@@ -683,8 +699,8 @@ def _lstm_topi(self, node):
     if batch_first:
         current_input = self.block_builder.emit(relax.op.permute_dims(current_input, [1, 0, 2]))
 
-    states = self.block_builder.emit(relax.op.tuple([final_h, final_c]))
-    return self.block_builder.emit(relax.op.tuple([current_input, states]))
+    states = self.block_builder.emit(relax.Tuple([final_h, final_c]))
+    return self.block_builder.emit(relax.Tuple([current_input, states]))
 
 
 def _lstm_relax(self, node):
@@ -697,6 +713,7 @@ def _lstm_relax(self, node):
     NOTE: This currently also unrolls. For true non-unrolling, the recursive
     pattern needs to be implemented at the TVMScript level.
     """
+    print("invoked (_lstm_relax)")  # DEBUG
     from kokoro_tvm.ops.lstm import emit_relax_lstm_unrolled
 
     args = self.retrieve_args(node)
@@ -806,13 +823,224 @@ def _lstm_relax(self, node):
     if batch_first:
         current_input = self.block_builder.emit(relax.op.permute_dims(current_input, [1, 0, 2]))
 
-    states = self.block_builder.emit(relax.op.tuple([final_h, final_c]))
-    return self.block_builder.emit(relax.op.tuple([current_input, states]))
+    states = self.block_builder.emit(relax.Tuple([final_h, final_c]))
+    return self.block_builder.emit(relax.Tuple([current_input, states]))
+
+
+def _lstm_tir(self, node):
+    """LSTM implementation using TIR PrimFunc with while loop (non-unrolled).
+
+    This creates a TIR function with a proper while loop that stays as a loop
+    at runtime, avoiding the IR explosion problem. The TIR function is added
+    to the module and called via call_tir.
+
+    IR size: O(1) regardless of sequence length (~42 lines per direction)
+
+    Handles two argument formats:
+    1. Custom op (kokoro.lstm_forward[_bidirectional].default):
+       - args: (input, h0, c0, Wi, Wh, Bi, Bh [, Wi_r, Wh_r, Bi_r, Bh_r])
+    2. Standard PyTorch LSTM (lstm.input):
+       - args: (input, hx, params, has_biases, num_layers, dropout, training, bidirectional, batch_first)
+    """
+    print("invoked (_lstm_tir)")  # DEBUG
+    from kokoro_tvm.ops.tir_lstm import create_tir_lstm_primfunc
+
+    args = self.retrieve_args(node)
+    func_name = str(node.target) if hasattr(node, "target") else ""
+
+    # Detect format: custom op has weights as direct args, PyTorch LSTM has params list
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 11))
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) == 11
+
+    if is_custom_op:
+        # Custom op format: (input, h0, c0, Wi, Wh, Bi, Bh [, Wi_r, Wh_r, Bi_r, Bh_r])
+        input_tensor = args[0]
+        h0 = args[1]
+        c0 = args[2]
+        Wi = args[3]
+        Wh = args[4]
+        Bi = args[5]
+        Bh = args[6]
+
+        if is_bidirectional_custom_op:
+            Wi_r = args[7]
+            Wh_r = args[8]
+            Bi_r = args[9]
+            Bh_r = args[10]
+
+        batch_first = False  # Custom op always uses seq_len first format internally
+
+    else:
+        # PyTorch LSTM format
+        input_tensor = args[0]
+        hx = args[1] if len(args) > 1 else None
+        params = args[2] if len(args) > 2 else None
+        has_biases = args[3] if len(args) > 3 else True
+        num_layers = args[4] if len(args) > 4 else 1
+        is_bidirectional_custom_op = args[7] if len(args) > 7 else False
+        batch_first = args[8] if len(args) > 8 else False
+
+        if num_layers > 1:
+            raise NotImplementedError("TIR LSTM does not yet support multi-layer mode")
+
+        Wi = params[0]
+        Wh = params[1]
+        Bi = params[2] if has_biases else None
+        Bh = params[3] if has_biases else None
+
+        if is_bidirectional_custom_op:
+            Wi_r = params[4]
+            Wh_r = params[5]
+            Bi_r = params[6] if has_biases else None
+            Bh_r = params[7] if has_biases else None
+
+        # Extract h0, c0 from hx
+        if hx is not None:
+            if isinstance(hx, (list, tuple)):
+                h0 = hx[0]
+                c0 = hx[1]
+            else:
+                h0 = self.block_builder.emit(relax.TupleGetItem(hx, 0))
+                c0 = self.block_builder.emit(relax.TupleGetItem(hx, 1))
+        else:
+            h0 = None
+            c0 = None
+
+    # Get dimensions
+    input_shape = self.shape_of(input_tensor)
+    if batch_first:
+        batch_size, seq_len, input_size = input_shape[0], input_shape[1], input_shape[2]
+    else:
+        seq_len, batch_size, input_size = input_shape[0], input_shape[1], input_shape[2]
+
+    seq_len = int(seq_len) if hasattr(seq_len, "__int__") else seq_len.value
+    batch_size = int(batch_size) if hasattr(batch_size, "__int__") else batch_size.value
+    input_size = int(input_size) if hasattr(input_size, "__int__") else input_size.value
+
+    # Get hidden size from weight
+    weight_shape = self.shape_of(Wi)
+    hidden_size = int(weight_shape[0]) // 4
+
+    dtype = input_tensor.struct_info.dtype
+
+    # Transpose if batch_first
+    if batch_first:
+        input_tensor = self.block_builder.emit(relax.op.permute_dims(input_tensor, [1, 0, 2]))
+
+    # Default biases if None
+    if Bi is None:
+        Bi = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+    if Bh is None:
+        Bh = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+
+    # Initial states - extract from h0/c0 tensors
+    num_directions = 2 if is_bidirectional_custom_op else 1
+
+    if is_custom_op:
+        # Custom op: h0 is [num_dirs, batch, hidden], squeeze first dim for forward
+        h_init = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+        c_init = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+    else:
+        if h0 is not None:
+            h_init = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+            c_init = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+        else:
+            h_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            c_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+
+    # Create and call TIR LSTM for forward direction
+    tir_func_fwd = create_tir_lstm_primfunc(seq_len, batch_size, input_size, hidden_size, dtype)
+    tir_gv_fwd = self.block_builder.add_func(tir_func_fwd, "tir_lstm_forward")
+
+    output_sinfo = relax.TensorStructInfo((seq_len, batch_size, hidden_size), dtype)
+    h_final_sinfo = relax.TensorStructInfo((batch_size, hidden_size), dtype)
+    c_final_sinfo = relax.TensorStructInfo((batch_size, hidden_size), dtype)
+
+    tir_result_fwd = self.block_builder.emit(
+        relax.call_tir(
+            tir_gv_fwd,
+            [input_tensor, h_init, c_init, Wi, Wh, Bi, Bh],
+            out_sinfo=[output_sinfo, h_final_sinfo, c_final_sinfo],
+        )
+    )
+
+    out_seq_fwd = self.block_builder.emit(relax.TupleGetItem(tir_result_fwd, 0))
+    h_final_fwd = self.block_builder.emit(relax.TupleGetItem(tir_result_fwd, 1))
+    c_final_fwd = self.block_builder.emit(relax.TupleGetItem(tir_result_fwd, 2))
+
+    if is_bidirectional_custom_op:
+        # Bidirectional: also run reverse direction
+
+        # Handle reverse biases
+        if Bi_r is None:
+            Bi_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+        if Bh_r is None:
+            Bh_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+
+        # Initial states for reverse direction
+        if is_custom_op:
+            h_init_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+            c_init_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+        else:
+            if h0 is not None:
+                h_init_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+                c_init_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+            else:
+                h_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+                c_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+
+        # Reverse input sequence
+        input_reversed = self.block_builder.emit(relax.op.flip(input_tensor, axis=0))
+
+        # Create and call TIR LSTM for reverse direction
+        tir_func_rev = create_tir_lstm_primfunc(seq_len, batch_size, input_size, hidden_size, dtype)
+        tir_gv_rev = self.block_builder.add_func(tir_func_rev, "tir_lstm_reverse")
+
+        tir_result_rev = self.block_builder.emit(
+            relax.call_tir(
+                tir_gv_rev,
+                [input_reversed, h_init_r, c_init_r, Wi_r, Wh_r, Bi_r, Bh_r],
+                out_sinfo=[output_sinfo, h_final_sinfo, c_final_sinfo],
+            )
+        )
+
+        out_seq_rev = self.block_builder.emit(relax.TupleGetItem(tir_result_rev, 0))
+        h_final_rev = self.block_builder.emit(relax.TupleGetItem(tir_result_rev, 1))
+        c_final_rev = self.block_builder.emit(relax.TupleGetItem(tir_result_rev, 2))
+
+        # Reverse the output of the reverse direction to align with forward
+        out_seq_rev = self.block_builder.emit(relax.op.flip(out_seq_rev, axis=0))
+
+        # Concatenate forward and reverse outputs: [seq, batch, 2*hidden]
+        out_seq = self.block_builder.emit(relax.op.concat([out_seq_fwd, out_seq_rev], axis=2))
+
+        # Stack final states: [2, batch, hidden]
+        h_final_fwd_exp = self.block_builder.emit(relax.op.expand_dims(h_final_fwd, 0))
+        h_final_rev_exp = self.block_builder.emit(relax.op.expand_dims(h_final_rev, 0))
+        c_final_fwd_exp = self.block_builder.emit(relax.op.expand_dims(c_final_fwd, 0))
+        c_final_rev_exp = self.block_builder.emit(relax.op.expand_dims(c_final_rev, 0))
+
+        h_final = self.block_builder.emit(relax.op.concat([h_final_fwd_exp, h_final_rev_exp], axis=0))
+        c_final = self.block_builder.emit(relax.op.concat([c_final_fwd_exp, c_final_rev_exp], axis=0))
+    else:
+        out_seq = out_seq_fwd
+        # Add layer dimension to final states
+        h_final = self.block_builder.emit(relax.op.expand_dims(h_final_fwd, 0))
+        c_final = self.block_builder.emit(relax.op.expand_dims(c_final_fwd, 0))
+
+    # Transpose output if batch_first
+    if batch_first:
+        out_seq = self.block_builder.emit(relax.op.permute_dims(out_seq, [1, 0, 2]))
+
+    states = self.block_builder.emit(relax.Tuple([h_final, c_final]))
+    return self.block_builder.emit(relax.Tuple([out_seq, states]))
 
 
 def _lstm(self, node):
-    """LSTM handler - dispatches to TOPI or Relax implementation based on config."""
-    if USE_RELAX_LSTM:
+    """LSTM handler - dispatches to TIR, Relax, or TOPI implementation based on config."""
+    if USE_TIR_LSTM:
+        return _lstm_tir(self, node)
+    elif USE_RELAX_LSTM:
         return _lstm_relax(self, node)
     else:
         return _lstm_topi(self, node)

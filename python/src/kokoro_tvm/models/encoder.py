@@ -22,6 +22,7 @@ from tvm.relax.frontend.torch.exported_program_translator import ExportedProgram
 
 from kokoro_tvm import tvm_extensions  # noqa: F401
 from kokoro_tvm.patches.lstm import apply_lstm_patch
+from kokoro_tvm.ops.lstm_custom_op import patch_lstm_modules as apply_lstm_custom_op_patch
 
 
 def get_kokoro_config() -> Dict[str, Any]:
@@ -126,6 +127,9 @@ def create_duration_module(
     print("Initializing ProsodyPredictor for duration...")
     predictor = ProsodyPredictor(style_dim=style_dim, d_hid=d_hid, nlayers=nlayers, max_dur=max_dur, dropout=0.0)
     predictor.eval()
+
+    # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
+    apply_lstm_custom_op_patch(predictor)
 
     class DurationWrapper(torch.nn.Module):
         """Wraps the duration path of ProsodyPredictor (text_encoder -> lstm -> duration_proj)."""
