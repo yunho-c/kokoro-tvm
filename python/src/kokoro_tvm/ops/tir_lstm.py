@@ -174,6 +174,7 @@ def create_tir_lstm_primfunc(
 def test_tir_lstm():
     """Test the TIR LSTM with While loop."""
     import traceback
+
     import numpy as np
 
     print("=" * 60)
@@ -189,7 +190,7 @@ def test_tir_lstm():
         script = func.script()
         lines = script.split("\n")
 
-        print(f"\n📊 TIR Statistics:")
+        print("\n📊 TIR Statistics:")
         print(f"   Lines: {len(lines)}")
         print(f"   Size: {len(script)} bytes")
 

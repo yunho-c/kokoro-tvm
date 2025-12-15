@@ -1,8 +1,9 @@
 """Test TIR LSTM numerical accuracy against PyTorch reference."""
 
 import numpy as np
-import tvm
 import torch
+import tvm
+
 from kokoro_tvm.ops.tir_lstm import create_tir_lstm_primfunc
 
 
@@ -44,7 +45,7 @@ def test_tir_lstm_vs_pytorch():
     hn_pt_np = hn_pt.numpy()
     cn_pt_np = cn_pt.numpy()
 
-    print(f"\nPyTorch output:")
+    print("\nPyTorch output:")
     print(f"  out[0,0,:4] = {out_pt_np[0, 0, :4]}")
     print(f"  hn[0,0,:4]  = {hn_pt_np[0, 0, :4]}")
     print(f"  Non-zero elements: {np.sum(out_pt_np != 0)}")
@@ -97,7 +98,7 @@ def test_tir_lstm_vs_pytorch():
     h_final_tir = h_final_tvm.numpy()
     c_final_tir = c_final_tvm.numpy()
 
-    print(f"\nTIR LSTM output:")
+    print("\nTIR LSTM output:")
     print(f"  out[0,0,:4] = {out_tir[0, 0, :4]}")
     print(f"  h_final[0,:4] = {h_final_tir[0, :4]}")
     print(f"  Non-zero elements: {np.sum(out_tir != 0)}")

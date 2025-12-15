@@ -16,7 +16,6 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-
 # Define custom op namespaces
 LSTM_OP_NAME = "kokoro::lstm_forward"
 LSTM_BIDIR_OP_NAME = "kokoro::lstm_forward_bidirectional"

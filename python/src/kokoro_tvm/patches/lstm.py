@@ -8,7 +8,8 @@ to avoid creating PackedSequence objects, which are not supported by torch.expor
 dynamic data-dependent shapes.
 """
 
-import torch.nn as nn
+from torch import nn
+
 
 def apply_lstm_patch():
     """Apply mokeypatch to torch.nn.utils.rnn for PackedSequence handling.

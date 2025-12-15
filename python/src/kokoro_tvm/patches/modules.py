@@ -8,8 +8,8 @@ which are not compatible with TVM export.
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 _text_encoder_patched = False
 _prosody_predictor_patched = False
@@ -22,9 +22,9 @@ def apply_text_encoder_patch():
     global _text_encoder_patched
     if _text_encoder_patched:
         return
-    
+
     from kokoro.modules import TextEncoder
-    
+
     def text_encoder_forward(self, x, input_lengths, m):
         x = self.embedding(x)
         x = x.transpose(1, 2)
@@ -34,11 +34,11 @@ def apply_text_encoder_patch():
             x = c(x)
             x.masked_fill_(m, 0.0)
         x = x.transpose(1, 2)
-        
+
         # Skip packing
         x, _ = self.lstm(x)
         # Skip unpacking
-        
+
         x = x.transpose(-1, -2)
         x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
         x_pad[:, :, :x.shape[-1]] = x
@@ -55,17 +55,17 @@ def apply_prosody_predictor_patch():
     global _prosody_predictor_patched
     if _prosody_predictor_patched:
         return
-    
+
     from kokoro.modules import ProsodyPredictor
-    
+
     def prosody_predictor_forward(self, texts, style, text_lengths, alignment, m):
         d = self.text_encoder(texts, style, text_lengths, m)
         m = m.unsqueeze(1)
-        
+
         # Skip packing
-        x, _ = self.lstm(d) 
+        x, _ = self.lstm(d)
         # Skip unpacking
-        
+
         x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]], device=x.device)
         x_pad[:, :x.shape[1], :] = x
         x = x_pad
@@ -82,9 +82,9 @@ def apply_duration_encoder_patch():
     global _duration_encoder_patched
     if _duration_encoder_patched:
         return
-    
-    from kokoro.modules import DurationEncoder, AdaLayerNorm
-    
+
+    from kokoro.modules import AdaLayerNorm, DurationEncoder
+
     def duration_encoder_forward(self, x, style, text_lengths, m):
         masks = m
         x = x.permute(2, 0, 1)
@@ -104,7 +104,7 @@ def apply_duration_encoder_patch():
                 # Skip packing
                 x, _ = block(x)
                 # Skip unpacking
-                
+
                 x = F.dropout(x, p=self.dropout, training=False)
                 x = x.transpose(-1, -2)
                 x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
@@ -121,17 +121,17 @@ def apply_adain_patch():
     global _adain_patched
     if _adain_patched:
         return
-    
+
     from kokoro.istftnet import AdaIN1d
-    
+
     original_adain_forward = AdaIN1d.forward
-    
+
     def new_adain_forward(self, x, s):
         # Hint that sequence length is > 1 (we set min=2)
         if x.dim() == 3:
             torch._check(x.size(2) > 1)
         return original_adain_forward(self, x, s)
-        
+
     AdaIN1d.forward = new_adain_forward
     _adain_patched = True
 

@@ -8,12 +8,11 @@ import os
 
 import torch
 import tvm
-from tvm import relax
-from tvm.relax.frontend.torch import from_exported_program
-from torch.nn.attention import sdpa_kernel, SDPBackend
-
 from kokoro import KModel
 from kokoro.model import KModelForONNX
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from tvm import relax
+from tvm.relax.frontend.torch import from_exported_program
 
 # Import extensions (applies TVM patches on import)
 from kokoro_tvm import tvm_extensions  # noqa: F401
@@ -32,10 +31,10 @@ def compile_kokoro(model, output_dir: str):
         output_dir: Directory to save compiled artifacts
     """
     print("Tracing model with torch.export...")
-    
+
     # Define symbolic dimensions
     seq_len = torch.export.Dim("seq_len", min=2, max=512)
-    
+
     # Create dummy inputs
     dummy_input_ids = torch.randint(0, 100, (1, 50), dtype=torch.long)
     dummy_style = torch.randn(1, 256, dtype=torch.float32)
@@ -63,10 +62,10 @@ def compile_kokoro(model, output_dir: str):
             (dummy_input_ids, dummy_style, dummy_speed),
             dynamic_shapes=dynamic_shapes
         )
-    
+
     print("Importing to TVM Relax...")
     mod = from_exported_program(exported_program)
-    
+
     # Basic optimization pipeline
     print("Applying optimizations...")
     seq = tvm.transform.Sequential([
@@ -76,13 +75,13 @@ def compile_kokoro(model, output_dir: str):
         relax.transform.DeadCodeElimination(),
         relax.transform.CanonicalizeBindings(),
     ])
-    
+
     mod = seq(mod)
-    
+
     # Print the module to verify
     print("Compilation successful!")
     print(mod.script(show_meta=False)[:1000] + "\n...")
-    
+
     # Save the module
     output_path = os.path.join(output_dir, "kokoro_relax.json")
     with open(output_path, "w") as f:
@@ -94,15 +93,15 @@ def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser("Compile Kokoro Model to TVM Relax", add_help=True)
     parser.add_argument(
-        "--config_file", "-c", type=str, required=False, 
+        "--config_file", "-c", type=str, required=False,
         help="path to config file"
     )
     parser.add_argument(
-        "--checkpoint_path", "-p", type=str, required=False, 
+        "--checkpoint_path", "-p", type=str, required=False,
         help="path to checkpoint file"
     )
     parser.add_argument(
-        "--output_dir", "-o", type=str, default="tvm_output", 
+        "--output_dir", "-o", type=str, default="tvm_output",
         help="output directory"
     )
 
@@ -111,20 +110,20 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print(f"Loading model...")
+    print("Loading model...")
     config = args.config_file
     checkpoint = args.checkpoint_path
-    
+
     if not config or not checkpoint:
         from huggingface_hub import hf_hub_download
-        repo_id = 'hexgrad/Kokoro-82M'
+        repo_id = "hexgrad/Kokoro-82M"
         if not config:
             print(f"Downloading config from {repo_id}...")
-            config = hf_hub_download(repo_id=repo_id, filename='config.json')
+            config = hf_hub_download(repo_id=repo_id, filename="config.json")
         if not checkpoint:
             print(f"Downloading weights from {repo_id}...")
-            checkpoint = hf_hub_download(repo_id=repo_id, filename='kokoro-v1_0.pth')
-            
+            checkpoint = hf_hub_download(repo_id=repo_id, filename="kokoro-v1_0.pth")
+
     kmodel = KModel(config=config, model=checkpoint, disable_complex=True)
     model = KModelForONNX(kmodel).eval()
 

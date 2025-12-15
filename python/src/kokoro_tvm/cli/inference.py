@@ -6,21 +6,21 @@
 import argparse
 import json
 
+import numpy as np
 import soundfile as sf
 import torch
-import numpy as np
 from huggingface_hub import hf_hub_download
 from kokoro.pipeline import KPipeline
 
-from kokoro_tvm.pipeline import KokoroPipeline
 from kokoro_tvm.config import TARGET_CONFIGS
+from kokoro_tvm.pipeline import KokoroPipeline
 
 
 def load_vocab() -> dict:
     """Load the Kokoro vocabulary from HuggingFace."""
     repo_id = "hexgrad/Kokoro-82M"
     config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
     return config["vocab"]
 
@@ -34,8 +34,8 @@ def load_voice_pack(voice: str) -> torch.Tensor:
     repo_id = "hexgrad/Kokoro-82M"
 
     packs: list[torch.Tensor] = []
-    for voice_name in voice.split(","):
-        voice_name = voice_name.strip()
+    for voice_name_raw in voice.split(","):
+        voice_name = voice_name_raw.strip()
         if not voice_name:
             continue
         voice_file = f"voices/{voice_name}.pt"

@@ -6,8 +6,8 @@
 import argparse
 from pathlib import Path
 
-from kokoro_tvm.profiling import benchmark_module, create_benchmark_report
 from kokoro_tvm.cli.port_decoder import TARGET_CONFIGS
+from kokoro_tvm.profiling import benchmark_module, create_benchmark_report
 
 
 def main():
@@ -31,18 +31,18 @@ def main():
     parser.add_argument("--compare", type=str, default=None,
                         help="Path to another module to compare against")
     args = parser.parse_args()
-    
+
     module_path = Path(args.module)
     if not module_path.exists():
         print(f"Error: Module not found: {module_path}")
         return 1
-    
+
     print(f"Profiling: {module_path}")
     print(f"Target: {args.target}")
     print(f"Sequence length: {args.seq_len}")
     print(f"Warmup: {args.warmup}, Repeat: {args.repeat}")
     print()
-    
+
     # Run benchmark
     result = benchmark_module(
         module_path,
@@ -52,11 +52,11 @@ def main():
         warmup=args.warmup,
         repeat=args.repeat,
     )
-    
+
     print("Results:")
     print(result)
     print()
-    
+
     # Create report
     report = create_benchmark_report(
         module_path,
@@ -65,7 +65,7 @@ def main():
         args.seq_len,
         output_path=args.output,
     )
-    
+
     # Compare if requested
     if args.compare:
         compare_path = Path(args.compare)
@@ -81,19 +81,19 @@ def main():
                 warmup=args.warmup,
                 repeat=args.repeat,
             )
-            
+
             print("Comparison results:")
             print(compare_result)
             print()
-            
+
             from kokoro_tvm.profiling.benchmark import compare_results
             comparison = compare_results(result, compare_result)
-            
+
             print("Comparison:")
             print(f"  Speedup: {comparison['speedup']:.2f}x")
             print(f"  Latency reduction: {comparison['latency_reduction_pct']:.1f}%")
             print(f"  Throughput improvement: {comparison['throughput_improvement_pct']:.1f}%")
-    
+
     return 0
 
 

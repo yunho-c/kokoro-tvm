@@ -1,5 +1,5 @@
 """Custom TVM operators for Kokoro TTS."""
 
-from .lstm import emit_relax_lstm, LSTMConfig
+from .lstm import LSTMConfig, emit_relax_lstm
 
-__all__ = ["emit_relax_lstm", "LSTMConfig"]
+__all__ = ["LSTMConfig", "emit_relax_lstm"]

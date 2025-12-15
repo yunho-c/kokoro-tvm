@@ -7,12 +7,13 @@ This module monkeypatches TVM's ExportedProgramImporter to add support for
 additional PyTorch operators and handle dynamic shapes in Kokoro models.
 """
 
+import operator
+from typing import Callable
+
 import torch
 import tvm
 from tvm import relax
 from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
-import operator
-from typing import Callable
 
 # Debug flag - can be set from outside to control debug output
 DEBUG_ENABLED = False
@@ -944,13 +945,12 @@ def _lstm_tir(self, node):
         # Custom op: h0 is [num_dirs, batch, hidden], squeeze first dim for forward
         h_init = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
         c_init = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+    elif h0 is not None:
+        h_init = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+        c_init = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
     else:
-        if h0 is not None:
-            h_init = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
-            c_init = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
-        else:
-            h_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
-            c_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+        h_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+        c_init = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
 
     # Create and call TIR LSTM for forward direction
     tir_func_fwd = create_tir_lstm_primfunc(seq_len, batch_size, input_size, hidden_size, dtype)
@@ -985,13 +985,12 @@ def _lstm_tir(self, node):
         if is_custom_op:
             h_init_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
             c_init_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+        elif h0 is not None:
+            h_init_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+            c_init_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
         else:
-            if h0 is not None:
-                h_init_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
-                c_init_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
-            else:
-                h_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
-                c_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            h_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            c_init_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
 
         # Reverse input sequence
         input_reversed = self.block_builder.emit(relax.op.flip(input_tensor, axis=0))
@@ -1184,17 +1183,16 @@ def _lstm_mps(self, node):
             c0_f = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
             h0_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
             c0_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+        elif hx is not None:
+            h0_f = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+            c0_f = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+            h0_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+            c0_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
         else:
-            if hx is not None:
-                h0_f = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
-                c0_f = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
-                h0_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
-                c0_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
-            else:
-                h0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
-                c0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
-                h0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
-                c0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            h0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            c0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            h0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+            c0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
 
         out_f, h_f, c_f = emit_unidirectional(input_tensor, Wi, Wh, Bi, Bh, h0_f, c0_f)
         input_rev = self.block_builder.emit(relax.op.flip(input_tensor, axis=time_axis))
@@ -1261,21 +1259,20 @@ def _convolution(self, node):
             )
         else:
             raise ValueError(f"Unsupported transposed convolution dimensionality: {ndim}")
+    elif ndim == 3:  # 1D convolution (N, C, W)
+        out = self._conv1d_impl(
+            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
+        )
+    elif ndim == 4:  # 2D convolution (N, C, H, W)
+        out = self._conv2d_impl(
+            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
+        )
+    elif ndim == 5:  # 3D convolution (N, C, D, H, W)
+        out = self._conv3d_impl(
+            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
+        )
     else:
-        if ndim == 3:  # 1D convolution (N, C, W)
-            out = self._conv1d_impl(
-                x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-            )
-        elif ndim == 4:  # 2D convolution (N, C, H, W)
-            out = self._conv2d_impl(
-                x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-            )
-        elif ndim == 5:  # 3D convolution (N, C, D, H, W)
-            out = self._conv3d_impl(
-                x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-            )
-        else:
-            raise ValueError(f"Unsupported convolution dimensionality: {ndim}")
+        raise ValueError(f"Unsupported convolution dimensionality: {ndim}")
 
     # Debug output shape
     out_shape = self.shape_of(out)
@@ -1418,7 +1415,7 @@ def _cat(self, node):
 
     # Force shape if inference failed (likely due to symbolic mismatch in non-concat dims)
     if self.shape_of(out) is None:
-        debug_print(f"DEBUG: _cat output shape is None. Attempting to force shape based on first input.")
+        debug_print("DEBUG: _cat output shape is None. Attempting to force shape based on first input.")
         if shapes[0] is not None:
             # Assuming all inputs match the first input on non-concat dims
             # And we just sum the concat dim
@@ -1598,7 +1595,7 @@ def _index_put(self, node):
                 # For now, just trust scalar usage or broadcasting if ndim matches?
 
             if use_where:
-                debug_print(f"DEBUG: Using where() optimization for bool index_put")
+                debug_print("DEBUG: Using where() optimization for bool index_put")
                 return self.block_builder.emit(relax.op.where(mask, values, data))
 
             # argwhere fallback

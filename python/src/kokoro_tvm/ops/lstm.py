@@ -16,7 +16,8 @@ Usage:
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+from typing import Optional
+
 import tvm
 from tvm import relax
 from tvm.relax import Var

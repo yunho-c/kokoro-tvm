@@ -11,9 +11,9 @@ import torch
 import tvm
 from tvm import relax
 
-from kokoro_tvm import tvm_extensions  # applies TVM patches on import # noqa: F401
-from kokoro_tvm.patches.sinegen import apply_sinegen_patch
+from kokoro_tvm import tvm_extensions  # applies TVM patches on import
 from kokoro_tvm.config import TARGET_CONFIGS, resolve_target
+from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 
 
 def main():
@@ -98,8 +98,8 @@ def compile_decoder(args, target):
 
     # Get config for verification later
     config = get_decoder_config()
-    hidden_dim = config['hidden_dim']
-    style_dim = config['style_dim']
+    hidden_dim = config["hidden_dim"]
+    style_dim = config["style_dim"]
 
     # Compile
     print(f"Compiling for target: {target}")
@@ -231,7 +231,7 @@ def compile_decoder(args, target):
     print(f"Running inference with test_len={test_len}...")
     output = vm["decoder_forward"](*inputs)
 
-    if hasattr(output, 'shape'):
+    if hasattr(output, "shape"):
         print("Output shape:", output.shape)
     else:
         print(f"Output is an Array with {len(output)} elements:")

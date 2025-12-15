@@ -4,17 +4,15 @@ Compares TVM TIR LSTM output against PyTorch reference using the SAME model weig
 """
 
 import copy
+
 import numpy as np
 import torch
 import tvm
+from kokoro.model import ProsodyPredictor
 
-# Enable TIR LSTM before importing encoder
+from kokoro_tvm import tvm_extensions
 from kokoro_tvm.ops.lstm_custom_op import patch_lstm_modules
 from kokoro_tvm.patches.lstm import apply_lstm_patch
-from kokoro_tvm import tvm_extensions
-
-# Import Kokoro's ProsodyPredictor
-from kokoro.model import ProsodyPredictor
 
 
 class DurationWrapper(torch.nn.Module):

@@ -11,7 +11,7 @@ import torch
 import tvm
 from tvm import relax
 
-from kokoro_tvm import tvm_extensions  # noqa: F401
+from kokoro_tvm import tvm_extensions
 from kokoro_tvm.config import resolve_target
 
 

@@ -34,9 +34,9 @@ def resolve_target(target_name: str) -> tuple:
     """
     if target_name not in TARGET_CONFIGS:
         raise ValueError(f"Unknown target: {target_name}. Available: {list(TARGET_CONFIGS.keys())}")
-    
+
     config = TARGET_CONFIGS[target_name]
-    
+
     if "target_host" in config:
         # Metal targets have separate host target
         target_host = tvm.target.Target(config["target_host"])
@@ -45,5 +45,5 @@ def resolve_target(target_name: str) -> tuple:
         # CPU-only targets
         target = tvm.target.Target(config["target"])
         target_host = None
-    
+
     return target, target_host, config["extension"], config["description"]

@@ -4,15 +4,15 @@
 """MetaSchedule tuning utilities for Kokoro TVM."""
 
 from kokoro_tvm.tuning.metaschedule import (
-    tune_module,
     apply_tuned_database,
-    get_tuning_pipeline,
     estimate_tuning_time,
+    get_tuning_pipeline,
+    tune_module,
 )
 
 __all__ = [
-    "tune_module",
-    "apply_tuned_database", 
-    "get_tuning_pipeline",
+    "apply_tuned_database",
     "estimate_tuning_time",
+    "get_tuning_pipeline",
+    "tune_module",
 ]

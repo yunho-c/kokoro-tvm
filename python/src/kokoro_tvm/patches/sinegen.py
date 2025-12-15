@@ -20,7 +20,7 @@ def _f02sine_friendly(self, f0_values):
     rand_ini = torch.rand(f0_values.shape[0], f0_values.shape[2], device=f0_values.device)
     rand_ini[:, 0] = 0
     rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
-    
+
     if not self.flag_for_pulse:
         tgt_len = f0_values.shape[1] // self.upsample_scale
         rad_values = F.interpolate(
@@ -28,8 +28,8 @@ def _f02sine_friendly(self, f0_values):
         ).transpose(1, 2)
         phase = torch.cumsum(rad_values, dim=1) * 2 * torch.pi
         phase = F.interpolate(
-            phase.transpose(1, 2) * self.upsample_scale, 
-            size=f0_values.shape[1], 
+            phase.transpose(1, 2) * self.upsample_scale,
+            size=f0_values.shape[1],
             mode="linear"
         ).transpose(1, 2)
         sines = torch.sin(phase)
@@ -48,10 +48,10 @@ def apply_sinegen_patch():
     global _patched
     if _patched:
         return
-    
+
     from kokoro.istftnet import SineGen
-    
-    if not hasattr(SineGen, '_old_f02sine'):
+
+    if not hasattr(SineGen, "_old_f02sine"):
         SineGen._old_f02sine = SineGen._f02sine
         SineGen._f02sine = _f02sine_friendly
         _patched = True

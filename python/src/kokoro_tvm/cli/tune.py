@@ -8,9 +8,9 @@ import argparse
 import tvm
 from tvm import relax
 
-from kokoro_tvm.models import create_decoder_module
-from kokoro_tvm.tuning import tune_module, estimate_tuning_time
 from kokoro_tvm.cli.port_decoder import TARGET_CONFIGS, resolve_target
+from kokoro_tvm.models import create_decoder_module
+from kokoro_tvm.tuning import estimate_tuning_time, tune_module
 
 
 def main():
@@ -32,49 +32,49 @@ def main():
     parser.add_argument("--output", type=str, default=None,
                         help="Output path for tuned module")
     args = parser.parse_args()
-    
+
     # Resolve target
     target, _, ext, desc = resolve_target(args.target)
-    
+
     # Set default output
     if args.output is None:
         args.output = f"decoder_tuned{ext}"
-    
+
     print(f"Target: {desc}")
     print(f"Work directory: {args.work_dir}")
     print(f"Max trials: {args.max_trials}")
-    
+
     # Create Relax module using shared function
     mod = create_decoder_module(
         seq_len=args.seq_len,
         load_weights=not args.no_weights,
     )
-    
+
     # Estimate tuning time
     estimate = estimate_tuning_time(mod, target, args.max_trials)
-    
-    print(f"\nTuning estimation:")
+
+    print("\nTuning estimation:")
     print(f"  TIR functions to tune: {estimate['num_tir_functions']}")
     print(f"  Estimated time: {estimate['estimated_minutes']:.1f} minutes")
-    
+
     if args.estimate:
         print("\n(--estimate flag set, skipping actual tuning)")
         return
-    
+
     # Run tuning
     print("\nStarting tuning...")
     tuned_mod = tune_module(
-        mod, 
-        target, 
+        mod,
+        target,
         work_dir=args.work_dir,
         max_trials=args.max_trials,
     )
-    
+
     # Build and save
     print("\nBuilding tuned module...")
     with tvm.transform.PassContext(opt_level=3, config={"tir.enable_debug": False}):
         ex = relax.build(tuned_mod, target)
-    
+
     ex.export_library(args.output)
     print(f"Saved tuned module to: {args.output}")
 

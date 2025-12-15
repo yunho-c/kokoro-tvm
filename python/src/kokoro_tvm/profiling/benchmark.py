@@ -10,7 +10,7 @@ and generating performance reports.
 import json
 import platform
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -23,7 +23,7 @@ from tvm.runtime import Tensor
 @dataclass
 class BenchmarkResult:
     """Container for benchmark results."""
-    
+
     mean_ms: float
     std_ms: float
     min_ms: float
@@ -32,10 +32,10 @@ class BenchmarkResult:
     throughput_per_sec: float
     num_runs: int
     warmup_runs: int
-    
+
     def to_dict(self) -> dict:
         return asdict(self)
-    
+
     def __str__(self) -> str:
         return (
             f"Latency: {self.mean_ms:.3f} ± {self.std_ms:.3f} ms "
@@ -74,14 +74,14 @@ def benchmark_inference(
         BenchmarkResult with timing statistics
     """
     func = vm[func_name]
-    
+
     # Warmup
     for _ in range(warmup):
         _ = func(*inputs)
-    
+
     # Sync before timing
     tvm.runtime.device_sync(inputs[0].device)
-    
+
     # Timed runs
     times_ms = []
     for _ in range(repeat):
@@ -90,9 +90,9 @@ def benchmark_inference(
         tvm.runtime.device_sync(inputs[0].device)
         end = time.perf_counter()
         times_ms.append((end - start) * 1000)
-    
+
     times_ms = np.array(times_ms)
-    
+
     return BenchmarkResult(
         mean_ms=float(np.mean(times_ms)),
         std_ms=float(np.std(times_ms)),
@@ -135,7 +135,7 @@ def benchmark_module(
     lib = tvm.runtime.load_module(str(lib_path))
     dev = get_device(target)
     vm = relax.VirtualMachine(lib, dev)
-    
+
     # Create synthetic inputs matching decoder signature
     inputs = [
         tvm.runtime.tensor(np.random.randn(1, hidden_dim, seq_len).astype("float32"), device=dev),
@@ -143,7 +143,7 @@ def benchmark_module(
         tvm.runtime.tensor(np.random.randn(1, seq_len * 2).astype("float32"), device=dev),
         tvm.runtime.tensor(np.random.randn(1, style_dim).astype("float32"), device=dev),
     ]
-    
+
     return benchmark_inference(vm, func_name, inputs, warmup, repeat)
 
 
@@ -179,13 +179,13 @@ def create_benchmark_report(
         "results": result.to_dict(),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    
+
     if output_path:
         output_path = Path(output_path)
         with open(output_path, "w") as f:
             json.dump(report, f, indent=2)
         print(f"Report saved to: {output_path}")
-    
+
     return report
 
 
@@ -205,7 +205,7 @@ def compare_results(
     speedup = baseline.mean_ms / optimized.mean_ms
     latency_reduction_pct = (1 - optimized.mean_ms / baseline.mean_ms) * 100
     throughput_improvement_pct = (optimized.throughput_per_sec / baseline.throughput_per_sec - 1) * 100
-    
+
     return {
         "speedup": speedup,
         "latency_reduction_pct": latency_reduction_pct,

@@ -12,9 +12,9 @@ from typing import Optional
 
 import torch
 import tvm
-from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
 from huggingface_hub import hf_hub_download
 from kokoro.istftnet import Decoder
+from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
 
 from kokoro_tvm import tvm_extensions  # noqa: F401 - apply TVM patches
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
@@ -54,18 +54,18 @@ def create_decoder_module(
     """
     # Apply patches before export
     apply_sinegen_patch()
-    
+
     # Load config from HuggingFace
-    repo_id = 'hexgrad/Kokoro-82M'
-    config_path = hf_hub_download(repo_id=repo_id, filename='config.json')
-    with open(config_path, 'r', encoding='utf-8') as f:
+    repo_id = "hexgrad/Kokoro-82M"
+    config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
+    with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
-    hidden_dim = config['hidden_dim']
-    style_dim = config['style_dim']
-    n_mels = config['n_mels']
-    istftnet_params = config['istftnet']
-    
+    hidden_dim = config["hidden_dim"]
+    style_dim = config["style_dim"]
+    n_mels = config["n_mels"]
+    istftnet_params = config["istftnet"]
+
     # Initialize decoder
     decoder = Decoder(
         dim_in=hidden_dim,
@@ -74,29 +74,29 @@ def create_decoder_module(
         disable_complex=True,
         **istftnet_params
     )
-    
+
     # Load pretrained weights if requested
     if load_weights:
-        model_filename = 'kokoro-v1_0.pth'
+        model_filename = "kokoro-v1_0.pth"
         print(f"Downloading pretrained weights: {model_filename}...")
         model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
-        
+
         print(f"Loading decoder weights from {model_path}...")
-        state_dicts = torch.load(model_path, map_location='cpu', weights_only=True)
-        
-        if 'decoder' in state_dicts:
-            decoder_state_dict = state_dicts['decoder']
-            first_key = next(iter(decoder_state_dict.keys()), '')
-            if first_key.startswith('module.'):
+        state_dicts = torch.load(model_path, map_location="cpu", weights_only=True)
+
+        if "decoder" in state_dicts:
+            decoder_state_dict = state_dicts["decoder"]
+            first_key = next(iter(decoder_state_dict.keys()), "")
+            if first_key.startswith("module."):
                 print("Stripping 'module.' prefix from weight keys...")
                 decoder_state_dict = {k[7:]: v for k, v in decoder_state_dict.items()}
             decoder.load_state_dict(decoder_state_dict, strict=False)
             print("Successfully loaded pretrained decoder weights!")
         else:
-            print(f"Warning: 'decoder' key not found in checkpoint. Using random weights.")
+            print("Warning: 'decoder' key not found in checkpoint. Using random weights.")
     else:
         print("Skipping weight loading. Using random weights.")
-    
+
     decoder.eval()
 
     # Create static inputs
@@ -105,7 +105,7 @@ def create_decoder_module(
     f0 = torch.randn(batch_size, seq_len * 2)
     n = torch.randn(batch_size, seq_len * 2)
     s = torch.randn(batch_size, style_dim)
-    
+
     print(f"Static inputs: asr={asr.shape}, f0={f0.shape}, n={n.shape}, s={s.shape}")
 
     # Export with torch.export
@@ -114,7 +114,7 @@ def create_decoder_module(
         decoder,
         (asr, f0, n, s),
     )
-    
+
     # Run decompositions
     print("Running decompositions...")
     try:
@@ -128,20 +128,20 @@ def create_decoder_module(
     print("Importing into TVM Relax...")
     from tvm.relax.frontend.torch import from_exported_program
     mod = from_exported_program(
-        exported_program, 
+        exported_program,
         keep_params_as_input=False,
-        unwrap_unit_return_tuple=False, 
+        unwrap_unit_return_tuple=False,
         no_bind_return_tuple=False
     )
-    
+
     print("Relax Module created.")
-    
+
     # Dump IR for debugging if requested
     if dump_ir:
         with open(dump_ir, "w") as f:
             f.write(mod.script())
         print(f"Dumped IR to {dump_ir}")
-    
+
     # Rename 'main' to specified function name
     new_funcs = {}
     for gv, func in mod.functions.items():
@@ -156,10 +156,10 @@ def create_decoder_module(
             print(f"Renamed function 'main' to '{func_name}'")
         else:
             new_funcs[gv] = func
-    
+
     mod = tvm.IRModule(new_funcs, attrs=mod.attrs)
     print(f"Module has {len(mod.functions)} functions")
-    
+
     return mod
 
 
@@ -169,7 +169,7 @@ def get_decoder_config() -> dict:
     Returns:
         Dictionary with hidden_dim, style_dim, n_mels, and istftnet params
     """
-    repo_id = 'hexgrad/Kokoro-82M'
-    config_path = hf_hub_download(repo_id=repo_id, filename='config.json')
-    with open(config_path, 'r', encoding='utf-8') as f:
+    repo_id = "hexgrad/Kokoro-82M"
+    config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
+    with open(config_path, encoding="utf-8") as f:
         return json.load(f)

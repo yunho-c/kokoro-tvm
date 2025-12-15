@@ -21,9 +21,8 @@ from tvm.relax.frontend.torch import from_exported_program
 from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
 
 from kokoro_tvm import tvm_extensions  # noqa: F401
-from kokoro_tvm.patches.lstm import apply_lstm_patch
 from kokoro_tvm.ops.lstm_custom_op import patch_lstm_modules as apply_lstm_custom_op_patch
-
+from kokoro_tvm.patches.lstm import apply_lstm_patch
 
 _CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
 _CHECKPOINT_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -35,7 +34,7 @@ def get_kokoro_config() -> Dict[str, Any]:
     if repo_id in _CONFIG_CACHE:
         return _CONFIG_CACHE[repo_id]
     config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = json.load(f)
     _CONFIG_CACHE[repo_id] = cfg
     return cfg

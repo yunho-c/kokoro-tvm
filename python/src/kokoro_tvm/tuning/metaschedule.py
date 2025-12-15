@@ -35,7 +35,7 @@ def get_tuning_pipeline(
         Sequential transform pipeline
     """
     work_dir = str(work_dir)
-    
+
     return tvm.transform.Sequential([
         relax.transform.LegalizeOps(),
         relax.transform.MetaScheduleTuneTIR(
@@ -73,25 +73,25 @@ def tune_module(
         >>> tuned_mod = tune_module(mod, target, work_dir="tuning_logs", max_trials=2000)
     """
     from tvm import meta_schedule as ms
-    
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"Starting MetaSchedule tuning...")
+
+    print("Starting MetaSchedule tuning...")
     print(f"  Target: {target}")
     print(f"  Work dir: {work_dir}")
     print(f"  Max trials: {max_trials}")
-    
+
     # Run with profiling to track tuning time
     with ms.Profiler() as profiler:
         with target:
             pipeline = get_tuning_pipeline(work_dir, max_trials)
             tuned_mod = pipeline(mod)
-    
+
     # Print profiling results
     print("\nTuning completed!")
     print(profiler.table())
-    
+
     return tuned_mod
 
 
@@ -117,19 +117,19 @@ def apply_tuned_database(
         FileNotFoundError: If tuning database doesn't exist
     """
     work_dir = Path(work_dir)
-    
+
     if not work_dir.exists():
         raise FileNotFoundError(f"Tuning database not found: {work_dir}")
-    
+
     print(f"Applying tuned schedules from: {work_dir}")
-    
+
     with target:
         pipeline = tvm.transform.Sequential([
             relax.transform.LegalizeOps(),
             relax.transform.MetaScheduleApplyDatabase(work_dir=str(work_dir)),
         ])
         tuned_mod = pipeline(mod)
-    
+
     return tuned_mod
 
 
@@ -155,9 +155,9 @@ def estimate_tuning_time(
         1 for gv, func in mod.functions.items()
         if isinstance(func, tvm.tir.PrimFunc)
     )
-    
+
     estimated_seconds = num_tir_funcs * max_trials * seconds_per_trial
-    
+
     return {
         "num_tir_functions": num_tir_funcs,
         "max_trials": max_trials,
