@@ -101,6 +101,9 @@ def main():
     parser.add_argument(
         "--target", type=str, default="llvm", choices=list(TARGET_CONFIGS.keys()), help="Target device for inference"
     )
+    parser.add_argument(
+        "--hybrid", action="store_true", help="Hybrid mode: encoder on CPU, decoder on GPU (for Metal/CUDA targets)"
+    )
 
     args = parser.parse_args()
 
@@ -127,7 +130,7 @@ def main():
     # resolve_target returns (target, target_host, extension, description)
     # We just need the device type for the pipeline
     device_type = args.target.split("-")[0]  # 'llvm', 'metal', etc.
-    pipeline = KokoroPipeline(args.lib_dir, device_type)
+    pipeline = KokoroPipeline(args.lib_dir, device_type, hybrid=args.hybrid)
 
     # Run inference
     print(f"Running inference (speed={args.speed})...")
