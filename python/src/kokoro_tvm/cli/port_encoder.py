@@ -35,22 +35,30 @@ def main():
         "--lstm-method",
         type=str,
         default="topi",
-        choices=["tir", "relax", "topi"],
-        help="LSTM implementation: tir (non-unrolled, O(1) IR), relax (unrolled), topi (original)",
+        choices=["mps", "tir", "relax", "topi"],
+        help="LSTM implementation: mps (Metal/MPS extern), tir (non-unrolled, O(1) IR), relax (unrolled), topi (original)",
     )
 
     args = parser.parse_args()
 
     # Configure LSTM method
-    if args.lstm_method == "tir":
+    if args.lstm_method == "mps":
+        tvm_extensions.USE_MPS_LSTM = True
+        tvm_extensions.USE_TIR_LSTM = False
+        tvm_extensions.USE_RELAX_LSTM = False
+        print("Using MPS LSTM (tvm.contrib.mps.lstm extern)")
+    elif args.lstm_method == "tir":
+        tvm_extensions.USE_MPS_LSTM = False
         tvm_extensions.USE_TIR_LSTM = True
         tvm_extensions.USE_RELAX_LSTM = False
         print("Using TIR LSTM (non-unrolled, O(1) IR size)")
     elif args.lstm_method == "relax":
+        tvm_extensions.USE_MPS_LSTM = False
         tvm_extensions.USE_TIR_LSTM = False
         tvm_extensions.USE_RELAX_LSTM = True
         print("Using Relax LSTM (unrolled)")
     else:
+        tvm_extensions.USE_MPS_LSTM = False
         tvm_extensions.USE_TIR_LSTM = False
         tvm_extensions.USE_RELAX_LSTM = False
         print("Using TOPI LSTM (original)")
@@ -107,6 +115,30 @@ def compile_component(name, args, target, ext):
         mod = relax.transform.FuseOps()(mod)
         mod = relax.transform.FuseTIR()(mod)
 
+        # Apply GPU scheduling for Metal targets
+        is_metal = "metal" in str(target).lower()
+        if is_metal:
+            print("Applying DLight GPU scheduling for Metal...")
+            from tvm import dlight as dl
+
+            try:
+                mod = dl.ApplyDefaultSchedule(
+                    dl.gpu.Matmul(),
+                    dl.gpu.Reduction(),
+                    dl.gpu.GeneralReduction(),
+                    dl.gpu.Fallback(),
+                )(mod)
+                print("DLight scheduling applied (Matmul + Reduction + Fallback).")
+            except Exception as e:
+                print(f"Warning: DLight scheduling failed: {e}")
+                print("Retrying with Fallback only...")
+                try:
+                    mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
+                    print("DLight Fallback scheduling applied.")
+                except Exception as e2:
+                    print(f"Warning: DLight Fallback also failed: {e2}")
+                    print("Continuing without DLight scheduling...")
+
     print("Building...")
     with tvm.transform.PassContext(opt_level=3):
         ex = relax.build(mod, target)
@@ -140,7 +172,8 @@ def validate_component(name, ex, args, target):
 
     elif name == "f0n":
         func_name = "f0n_forward"
-        inputs.append(tvm.runtime.tensor(torch.randn(1, 512, args.aligned_len).numpy().astype("float32"), device=dev))
+        # F0N expects `en` with channel dim 640 (text hidden + style features).
+        inputs.append(tvm.runtime.tensor(torch.randn(1, 640, args.aligned_len).numpy().astype("float32"), device=dev))
         inputs.append(tvm.runtime.tensor(torch.randn(1, 128).numpy().astype("float32"), device=dev))
 
     elif name == "text_encoder":

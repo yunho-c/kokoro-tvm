@@ -144,3 +144,13 @@ python scripts/compile_onnx.py
 ```
 
 This will generate `build/kokoro.so` and `build/kokoro_params.npz`.
+
+### Encoder LSTMs on Metal (MPS)
+
+If you build TVM with `USE_METAL=ON` and `USE_MPS=ON`, Kokoro encoder components that contain LSTMs can be compiled for `metal-macos` using the MPS extern path:
+
+```bash
+py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component duration --target metal-macos --lstm-method mps --seq-len 512 --validate
+py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component text_encoder --target metal-macos --lstm-method mps --seq-len 512 --validate
+py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component f0n --target metal-macos --lstm-method mps --aligned-len 5120 --validate
+```

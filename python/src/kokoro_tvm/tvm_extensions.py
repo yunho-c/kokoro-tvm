@@ -576,8 +576,12 @@ ExportedProgramImporter._expand = _expand
 #   USE_TIR_LSTM = True  -> TIR PrimFunc with while loop (O(1) IR size, recommended)
 #   USE_RELAX_LSTM = True -> Relax ops (still unrolled but cleaner code)
 #   Both False -> TOPI emit_te (original, causes IR explosion)
+#
+# MPS LSTM:
+#   USE_MPS_LSTM = True -> Call tvm.contrib.mps.lstm (Metal targets only)
 USE_TIR_LSTM = False  # Non-unrolled TIR LSTM with while loop
 USE_RELAX_LSTM = False  # Default to original for backward compatibility
+USE_MPS_LSTM = False  # MPS-backed LSTM via tvm.contrib.mps.lstm
 
 
 def _lstm_topi(self, node):
@@ -1038,12 +1042,171 @@ def _lstm_tir(self, node):
 
 def _lstm(self, node):
     """LSTM handler - dispatches to TIR, Relax, or TOPI implementation based on config."""
-    if USE_TIR_LSTM:
+    if USE_MPS_LSTM:
+        return _lstm_mps(self, node)
+    elif USE_TIR_LSTM:
         return _lstm_tir(self, node)
     elif USE_RELAX_LSTM:
         return _lstm_relax(self, node)
     else:
         return _lstm_topi(self, node)
+
+
+def _lstm_mps(self, node):
+    """LSTM implementation using tvm.contrib.mps.lstm extern call (Metal/MPS only)."""
+    print("invoked (_lstm_mps)")  # DEBUG
+    from tvm.contrib import mps as tvm_mps
+
+    args = self.retrieve_args(node)
+    func_name = str(node.target) if hasattr(node, "target") else ""
+
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 11))
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) == 11
+
+    if is_custom_op:
+        input_tensor = args[0]
+        h0 = args[1]
+        c0 = args[2]
+        Wi = args[3]
+        Wh = args[4]
+        Bi = args[5]
+        Bh = args[6]
+        batch_first = False
+        num_layers = 1
+        bidirectional = is_bidirectional_custom_op
+
+        if bidirectional:
+            Wi_r = args[7]
+            Wh_r = args[8]
+            Bi_r = args[9]
+            Bh_r = args[10]
+    else:
+        input_tensor = args[0]
+        hx = args[1] if len(args) > 1 else None
+        params = args[2] if len(args) > 2 else None
+        has_biases = args[3] if len(args) > 3 else True
+        num_layers = args[4] if len(args) > 4 else 1
+        bidirectional = args[7] if len(args) > 7 else False
+        batch_first = args[8] if len(args) > 8 else False
+
+        if num_layers != 1:
+            raise NotImplementedError("MPS LSTM path currently supports num_layers=1 only")
+
+        Wi = params[0]
+        Wh = params[1]
+        Bi = params[2] if has_biases else None
+        Bh = params[3] if has_biases else None
+
+        if bidirectional:
+            Wi_r = params[4]
+            Wh_r = params[5]
+            Bi_r = params[6] if has_biases else None
+            Bh_r = params[7] if has_biases else None
+
+        if hx is not None:
+            if isinstance(hx, (list, tuple)):
+                h0 = hx[0]
+                c0 = hx[1]
+            else:
+                h0 = self.block_builder.emit(relax.TupleGetItem(hx, 0))
+                c0 = self.block_builder.emit(relax.TupleGetItem(hx, 1))
+        else:
+            h0 = None
+            c0 = None
+
+    input_shape = self.shape_of(input_tensor)
+    if batch_first:
+        batch_size, seq_len, _ = input_shape[0], input_shape[1], input_shape[2]
+    else:
+        seq_len, batch_size, _ = input_shape[0], input_shape[1], input_shape[2]
+
+    seq_len = int(seq_len) if hasattr(seq_len, "__int__") else seq_len.value
+    batch_size = int(batch_size) if hasattr(batch_size, "__int__") else batch_size.value
+
+    weight_shape = self.shape_of(Wi)
+    hidden_size = int(weight_shape[0]) // 4
+    dtype = input_tensor.struct_info.dtype
+
+    time_axis = 1 if batch_first else 0
+
+    if Bi is None:
+        Bi = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+    if Bh is None:
+        Bh = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+
+    if h0 is None:
+        h0 = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((1, batch_size, hidden_size)), dtype))
+    if c0 is None:
+        c0 = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((1, batch_size, hidden_size)), dtype))
+
+    def emit_unidirectional(x, wih, whh, bih, bhh, h0_, c0_):
+        out = self.block_builder.emit_te(
+            lambda x_, wih_, whh_, bih_, bhh_, h0__, c0__: tvm_mps.lstm(
+                x_,
+                wih_,
+                whh_,
+                bih_,
+                bhh_,
+                h0__,
+                c0__,
+                hidden_size,
+                num_layers=1,
+                batch_first=batch_first,
+                bidirectional=False,
+            ),
+            x,
+            wih,
+            whh,
+            bih,
+            bhh,
+            h0_,
+            c0_,
+        )
+
+        if isinstance(out, (list, tuple)) or "Array" in str(type(out)):
+            return out[0], out[1], out[2]
+        return (
+            self.block_builder.emit(relax.TupleGetItem(out, 0)),
+            self.block_builder.emit(relax.TupleGetItem(out, 1)),
+            self.block_builder.emit(relax.TupleGetItem(out, 2)),
+        )
+
+    if not bidirectional:
+        out_seq, h_final, c_final = emit_unidirectional(input_tensor, Wi, Wh, Bi, Bh, h0, c0)
+    else:
+        if Bi_r is None:
+            Bi_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+        if Bh_r is None:
+            Bh_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((4 * hidden_size,)), dtype))
+
+        if is_custom_op:
+            h0_f = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+            c0_f = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+            h0_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+            c0_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+        else:
+            if hx is not None:
+                h0_f = self.block_builder.emit(relax.op.take(h0, relax.const(0, "int64"), axis=0))
+                c0_f = self.block_builder.emit(relax.op.take(c0, relax.const(0, "int64"), axis=0))
+                h0_r = self.block_builder.emit(relax.op.take(h0, relax.const(1, "int64"), axis=0))
+                c0_r = self.block_builder.emit(relax.op.take(c0, relax.const(1, "int64"), axis=0))
+            else:
+                h0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+                c0_f = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+                h0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+                c0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
+
+        out_f, h_f, c_f = emit_unidirectional(input_tensor, Wi, Wh, Bi, Bh, h0_f, c0_f)
+        input_rev = self.block_builder.emit(relax.op.flip(input_tensor, axis=time_axis))
+        out_r_rev, h_r, c_r = emit_unidirectional(input_rev, Wi_r, Wh_r, Bi_r, Bh_r, h0_r, c0_r)
+        out_r = self.block_builder.emit(relax.op.flip(out_r_rev, axis=time_axis))
+
+        out_seq = self.block_builder.emit(relax.op.concat([out_f, out_r], axis=2))
+        h_final = self.block_builder.emit(relax.op.concat([h_f, h_r], axis=0))
+        c_final = self.block_builder.emit(relax.op.concat([c_f, c_r], axis=0))
+
+    states = self.block_builder.emit(relax.Tuple([h_final, c_final]))
+    return self.block_builder.emit(relax.Tuple([out_seq, states]))
 
 
 def _convolution(self, node):
