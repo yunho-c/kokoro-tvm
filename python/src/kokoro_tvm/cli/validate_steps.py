@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: 2025-present Yunho Cho <opensource@yunhocho.com>
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Validate intermediate tensors across Kokoro stages.
+
+This tool compares:
+- Reference Kokoro (dynamic, as implemented in `external/kokoro`)
+- Reference Kokoro with static padding (matches kokoro-tvm pipeline shapes)
+- TVM-compiled modules (kokoro-tvm pipeline)
+
+It reports per-stage numerical error and basic waveform similarity metrics.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+from huggingface_hub import hf_hub_download
+from kokoro.model import KModel
+from kokoro.pipeline import KPipeline
+
+from kokoro_tvm.cli.inference import load_voice_pack, select_ref_s, text_to_ids
+from kokoro_tvm.pipeline import KokoroPipeline, SAMPLES_PER_FRAME, STATIC_AUDIO_LEN, STATIC_TEXT_LEN
+
+
+def _normalize(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float32, copy=False)
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    return x / (peak + 1e-8)
+
+
+def _metrics(a: np.ndarray, b: np.ndarray) -> dict[str, float]:
+    if a.size == 0 or b.size == 0:
+        return {"mae": float("nan"), "max_abs": float("nan"), "rmse": float("nan")}
+    a = a.astype(np.float32, copy=False)
+    b = b.astype(np.float32, copy=False)
+    diff = a - b
+    return {
+        "mae": float(np.mean(np.abs(diff))),
+        "max_abs": float(np.max(np.abs(diff))),
+        "rmse": float(np.sqrt(np.mean(diff * diff))),
+    }
+
+
+def _best_lag_corr(a: np.ndarray, b: np.ndarray, max_lag: int = 2400) -> tuple[float, int]:
+    if a.size == 0 or b.size == 0:
+        return 0.0, 0
+    a = _normalize(a)
+    b = _normalize(b)
+    max_lag = max(0, min(max_lag, min(a.size, b.size) - 1))
+    best = (-1.0, 0)
+    for lag in range(-max_lag, max_lag + 1):
+        if lag < 0:
+            a_seg = a[-lag:]
+            b_seg = b[: a_seg.size]
+        elif lag > 0:
+            b_seg = b[lag:]
+            a_seg = a[: b_seg.size]
+        else:
+            n = min(a.size, b.size)
+            a_seg = a[:n]
+            b_seg = b[:n]
+
+        n = min(a_seg.size, b_seg.size)
+        a_seg = a_seg[:n]
+        b_seg = b_seg[:n]
+        if a_seg.size < 2048:
+            continue
+        corr = float(np.corrcoef(a_seg, b_seg)[0, 1])
+        if corr > best[0]:
+            best = (corr, lag)
+    return best
+
+
+def _trace_dynamic(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: float) -> dict[str, object]:
+    ids = list(filter(lambda i: i is not None, map(lambda ch: kmodel.vocab.get(ch), phonemes)))
+    input_ids = torch.LongTensor([[0, *ids, 0]])
+    cur_len = int(input_ids.shape[1])
+    input_lengths = torch.full((1,), cur_len, dtype=torch.long)
+    text_mask = torch.arange(input_lengths.max()).unsqueeze(0).expand(1, -1)
+    text_mask = torch.gt(text_mask + 1, input_lengths.unsqueeze(1))
+
+    with torch.no_grad():
+        bert_dur = kmodel.bert(input_ids, attention_mask=(~text_mask).int())
+        d_en = kmodel.bert_encoder(bert_dur).transpose(-1, -2)
+        s = ref_s[:, 128:]
+        d = kmodel.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+        x, _ = kmodel.predictor.lstm(d)
+        duration_logits = kmodel.predictor.duration_proj(x)
+        duration = torch.sigmoid(duration_logits).sum(axis=-1) / speed
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        if pred_dur.dim() == 0:
+            pred_dur = pred_dur.unsqueeze(0)
+        indices = torch.repeat_interleave(torch.arange(cur_len), pred_dur)
+        pred_aln_trg = torch.zeros((cur_len, indices.shape[0]))
+        pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
+        pred_aln_trg = pred_aln_trg.unsqueeze(0)
+        en = d.transpose(-1, -2) @ pred_aln_trg
+        f0_pred, n_pred = kmodel.predictor.F0Ntrain(en, s)
+        t_en = kmodel.text_encoder(input_ids, input_lengths, text_mask)
+        asr = t_en @ pred_aln_trg
+        audio = kmodel.decoder(asr, f0_pred, n_pred, ref_s[:, :128]).squeeze().cpu()
+
+    frames = int(pred_aln_trg.shape[-1])
+    audio_trimmed = audio[: frames * SAMPLES_PER_FRAME].numpy()
+
+    return {
+        "cur_len": cur_len,
+        "frames": frames,
+        "d_en": d_en.numpy(),
+        "duration_logits": duration_logits.numpy(),
+        "d": d.numpy(),
+        "pred_dur": pred_dur.numpy(),
+        "t_en": t_en.numpy(),
+        "f0": f0_pred.numpy(),
+        "n": n_pred.numpy(),
+        "audio_trimmed": audio_trimmed,
+    }
+
+
+def _trace_static(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: float) -> dict[str, object]:
+    ids = list(filter(lambda i: i is not None, map(lambda ch: kmodel.vocab.get(ch), phonemes)))
+    input_ids_dyn = torch.LongTensor([[0, *ids, 0]])
+    cur_len = int(input_ids_dyn.shape[1])
+
+    input_ids = torch.zeros((1, STATIC_TEXT_LEN), dtype=torch.long)
+    input_ids[0, :cur_len] = input_ids_dyn[0]
+    text_mask = torch.zeros((1, STATIC_TEXT_LEN), dtype=torch.bool)
+    text_mask[:, cur_len:] = True
+    attention_mask = (~text_mask).int()
+    input_lengths = torch.tensor([cur_len], dtype=torch.long)
+
+    with torch.no_grad():
+        bert_dur = kmodel.bert(input_ids, attention_mask=attention_mask)
+        d_en = kmodel.bert_encoder(bert_dur).transpose(-1, -2)
+        s = ref_s[:, 128:]
+        d = kmodel.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+        x, _ = kmodel.predictor.lstm(d)
+        duration_logits = kmodel.predictor.duration_proj(x)
+        duration = torch.sigmoid(duration_logits).sum(axis=-1) / speed
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        if pred_dur.dim() == 0:
+            pred_dur = pred_dur.unsqueeze(0)
+        pred_dur = pred_dur[:cur_len]
+
+        indices = torch.repeat_interleave(torch.arange(cur_len), pred_dur)
+        frames = int(indices.numel())
+        if frames > STATIC_AUDIO_LEN:
+            indices = indices[:STATIC_AUDIO_LEN]
+            frames = STATIC_AUDIO_LEN
+
+        pred_aln_trg = torch.zeros((cur_len, STATIC_AUDIO_LEN))
+        pred_aln_trg[indices, torch.arange(frames)] = 1
+        pred_aln_trg = pred_aln_trg.unsqueeze(0)
+
+        full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
+        full_aln[0, :cur_len, :] = pred_aln_trg[0]
+
+        en = d.transpose(-1, -2) @ full_aln
+        f0_pred, n_pred = kmodel.predictor.F0Ntrain(en, s)
+        t_en = kmodel.text_encoder(input_ids, input_lengths, text_mask)
+        asr = t_en @ full_aln
+        audio = kmodel.decoder(asr, f0_pred, n_pred, ref_s[:, :128]).squeeze().cpu()
+
+    audio_trimmed = audio[: frames * SAMPLES_PER_FRAME].numpy()
+
+    return {
+        "cur_len": cur_len,
+        "frames": frames,
+        "d_en": d_en.numpy(),
+        "duration_logits": duration_logits.numpy(),
+        "d": d.numpy(),
+        "pred_dur": pred_dur.numpy(),
+        "t_en": t_en.numpy(),
+        "f0": f0_pred.numpy(),
+        "n": n_pred.numpy(),
+        "audio_trimmed": audio_trimmed,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate intermediate Kokoro stages (PyTorch vs TVM)")
+    parser.add_argument("--text", type=str, default="Hello world", help="Input text")
+    parser.add_argument("--lang", type=str, default="a", help="G2P language code (KPipeline)")
+    parser.add_argument("--voice", type=str, default="af_bella", help="Voice name")
+    parser.add_argument("--speed", type=float, default=1.0, help="Speech speed")
+    parser.add_argument("--lib-dir", type=str, default="tvm_output", help="Directory containing compiled TVM modules")
+    parser.add_argument("--device", type=str, default="metal", choices=["metal", "llvm", "cuda"], help="TVM device")
+    parser.add_argument("--hybrid", action="store_true", help="Hybrid mode (encoder on CPU, decoder on device)")
+    parser.add_argument("--save-dir", type=str, default=None, help="If set, write wavs for listening")
+    args = parser.parse_args()
+
+    kp = KPipeline(lang_code=args.lang, model=False)
+    chunks = [(r.graphemes, r.phonemes) for r in kp(args.text) if r.phonemes]
+    if not chunks:
+        raise ValueError(f"G2P produced no phonemes for input: {args.text!r}")
+    if len(chunks) > 1:
+        print(f"Warning: G2P chunked into {len(chunks)} segments; validating the first segment only.")
+    graphemes, phonemes = chunks[0]
+    print(f"graphemes={graphemes!r}")
+    print(f"phonemes={phonemes!r}")
+
+    kmodel = KModel(repo_id="hexgrad/Kokoro-82M", disable_complex=True).to("cpu").eval()
+    voice_pack_ref = torch.load(
+        hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename=f"voices/{args.voice}.pt"),
+        weights_only=True,
+    )
+    ref_s = select_ref_s(voice_pack_ref, len(phonemes))
+
+    trace_dyn = _trace_dynamic(kmodel, phonemes, ref_s, args.speed)
+    trace_static = _trace_static(kmodel, phonemes, ref_s, args.speed)
+
+    vocab = kmodel.vocab
+    input_ids_tvm = text_to_ids(phonemes, vocab)
+    voice_pack_tvm = load_voice_pack(args.voice)
+    ref_s_tvm = select_ref_s(voice_pack_tvm, len(phonemes))
+    pipeline = KokoroPipeline(args.lib_dir, args.device, hybrid=args.hybrid)
+    trace_tvm = pipeline.trace(input_ids_tvm, ref_s_tvm, speed=args.speed)
+
+    cur_len = int(trace_static["cur_len"])
+    print(f"cur_len={cur_len}")
+    print(f"frames_dynamic={trace_dyn['frames']}, frames_static={trace_static['frames']}, frames_tvm={trace_tvm['frames']}")
+
+    def show(name: str, a: np.ndarray, b: np.ndarray):
+        m = _metrics(a, b)
+        print(f"{name}: mae={m['mae']:.3e} max_abs={m['max_abs']:.3e} rmse={m['rmse']:.3e}")
+
+    print("\nStatic PyTorch vs TVM (module fidelity):")
+    show(
+        "bert.d_en[:cur_len]",
+        np.asarray(trace_static["d_en"])[:, :, :cur_len],
+        np.asarray(trace_tvm["d_en"])[:, :, :cur_len],
+    )
+    show(
+        "duration.logits[:cur_len]",
+        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+        np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
+    )
+    show(
+        "duration.d[:cur_len]",
+        np.asarray(trace_static["d"])[:, :cur_len, :],
+        np.asarray(trace_tvm["d"])[:, :cur_len, :],
+    )
+    show(
+        "text_encoder.t_en[:cur_len]",
+        np.asarray(trace_static["t_en"])[:, :, :cur_len],
+        np.asarray(trace_tvm["t_en"])[:, :, :cur_len],
+    )
+
+    static_frames = int(trace_static["frames"])
+    tvm_f0 = np.asarray(trace_tvm["f0"]).reshape(-1)
+    tvm_n = np.asarray(trace_tvm["n"]).reshape(-1)
+    static_f0 = np.asarray(trace_static["f0"]).reshape(-1)
+    static_n = np.asarray(trace_static["n"]).reshape(-1)
+    f_len = min(static_f0.size, tvm_f0.size, static_frames * 2)
+    show("f0[:2*frames_static]", static_f0[:f_len], tvm_f0[:f_len])
+    n_len = min(static_n.size, tvm_n.size, static_frames * 2)
+    show("n[:2*frames_static]", static_n[:n_len], tvm_n[:n_len])
+
+    audio_static = np.asarray(trace_static["audio_trimmed"]).reshape(-1)
+    audio_tvm = np.asarray(trace_tvm["audio_trimmed"]).reshape(-1)
+    corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
+    print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
+
+    print("\nDynamic PyTorch vs Static PyTorch (shape/static padding impact):")
+    show(
+        "bert.d_en[:cur_len]",
+        np.asarray(trace_dyn["d_en"]),
+        np.asarray(trace_static["d_en"])[:, :, :cur_len],
+    )
+    show(
+        "duration.logits",
+        np.asarray(trace_dyn["duration_logits"]),
+        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+    )
+    show("duration.d", np.asarray(trace_dyn["d"]), np.asarray(trace_static["d"])[:, :cur_len, :])
+    show("text_encoder.t_en", np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len])
+    corr2, lag2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]), audio_static, max_lag=2400)
+    print(f"audio_trimmed corr={corr2:.4f} lag={lag2} samples")
+
+    if args.save_dir:
+        out_dir = Path(args.save_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(out_dir / "trace_dynamic.wav", np.asarray(trace_dyn["audio_trimmed"]), 24000)
+        sf.write(out_dir / "trace_static.wav", audio_static, 24000)
+        sf.write(out_dir / "trace_tvm.wav", audio_tvm, 24000)
+        print(f"Wrote {out_dir / 'trace_dynamic.wav'}")
+        print(f"Wrote {out_dir / 'trace_static.wav'}")
+        print(f"Wrote {out_dir / 'trace_tvm.wav'}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

@@ -276,3 +276,122 @@ class KokoroPipeline:
         audio_1d = audio.squeeze()
         target_samples = min(int(audio_1d.numel()), int(actual_audio_len) * SAMPLES_PER_FRAME)
         return audio_1d[:target_samples]
+
+    def trace(
+        self,
+        input_ids: torch.LongTensor,
+        ref_s: torch.FloatTensor,
+        speed: float = 1.0,
+        include_full_audio: bool = False,
+    ) -> dict[str, object]:
+        """Run inference and return intermediate tensors for debugging/validation.
+
+        Values are returned as CPU numpy arrays or Python scalars.
+        """
+        enc_dev = self.cpu_dev if self.hybrid else self.gpu_dev
+        dec_dev = self.gpu_dev
+
+        cur_len = int(input_ids.shape[1])
+        if cur_len > STATIC_TEXT_LEN:
+            input_ids = input_ids[:, :STATIC_TEXT_LEN]
+            cur_len = STATIC_TEXT_LEN
+        elif cur_len < STATIC_TEXT_LEN:
+            pad = torch.zeros((1, STATIC_TEXT_LEN - cur_len), dtype=torch.long)
+            input_ids = torch.cat([input_ids, pad], dim=1)
+
+        text_mask = torch.zeros((1, STATIC_TEXT_LEN), dtype=torch.bool)
+        text_mask[:, cur_len:] = True
+        attention_mask = (~text_mask).long()
+        input_lengths = torch.tensor([cur_len], dtype=torch.long)
+
+        out: dict[str, object] = {
+            "cur_len": cur_len,
+            "input_ids": input_ids.numpy(),
+            "attention_mask": attention_mask.numpy(),
+            "text_mask": text_mask.numpy(),
+            "input_lengths": input_lengths.numpy(),
+        }
+
+        bert_inputs = [
+            tvm.runtime.tensor(input_ids.numpy(), device=enc_dev),
+            tvm.runtime.tensor(attention_mask.numpy(), device=enc_dev),
+        ]
+        d_en_tvm = self._unwrap(self.f_bert(*bert_inputs))
+        out["d_en"] = d_en_tvm.numpy()
+
+        s = ref_s[:, 128:].numpy()
+        duration_inputs = [
+            d_en_tvm,
+            tvm.runtime.tensor(s, device=enc_dev),
+            tvm.runtime.tensor(input_lengths.numpy(), device=enc_dev),
+            tvm.runtime.tensor(text_mask.numpy(), device=enc_dev),
+        ]
+        duration_out = self.f_duration(*duration_inputs)
+        duration_tvm = self._unwrap(duration_out[0]) if hasattr(duration_out, "__getitem__") else duration_out
+        d_tvm = duration_out[1] if hasattr(duration_out, "__getitem__") and len(duration_out) > 1 else None
+
+        out["duration_logits"] = duration_tvm.numpy()
+        out["d"] = d_tvm.numpy() if d_tvm is not None else None
+
+        duration = torch.from_numpy(duration_tvm.numpy()).float()
+        duration = torch.sigmoid(duration).sum(dim=-1) / speed
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        if pred_dur.dim() == 0:
+            pred_dur = pred_dur.unsqueeze(0)
+        pred_dur = pred_dur[:cur_len]
+
+        indices = torch.repeat_interleave(torch.arange(cur_len), pred_dur)
+        actual_audio_len = int(indices.numel())
+        if actual_audio_len > STATIC_AUDIO_LEN:
+            indices = indices[:STATIC_AUDIO_LEN]
+            actual_audio_len = STATIC_AUDIO_LEN
+
+        out["pred_dur"] = pred_dur.cpu().numpy()
+        out["frames"] = actual_audio_len
+
+        pred_aln_trg = torch.zeros((cur_len, STATIC_AUDIO_LEN))
+        pred_aln_trg[indices, torch.arange(int(indices.numel()))] = 1
+        pred_aln_trg = pred_aln_trg.unsqueeze(0)
+
+        full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
+        full_aln[0, :cur_len, :] = pred_aln_trg[0]
+
+        d = torch.from_numpy(d_tvm.numpy()) if d_tvm is not None else torch.zeros(1, STATIC_TEXT_LEN, 640)
+        en = d.transpose(-1, -2) @ full_aln
+
+        f0n_inputs = [
+            tvm.runtime.tensor(en.numpy(), device=enc_dev),
+            tvm.runtime.tensor(s, device=enc_dev),
+        ]
+        f0n_out = self.f_f0n(*f0n_inputs)
+        f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out
+        n_tvm = f0n_out[1] if hasattr(f0n_out, "__getitem__") and len(f0n_out) > 1 else None
+
+        out["f0"] = f0_tvm.numpy()
+        out["n"] = n_tvm.numpy() if n_tvm is not None else None
+
+        text_enc_inputs = [
+            tvm.runtime.tensor(input_ids.numpy(), device=enc_dev),
+            tvm.runtime.tensor(input_lengths.numpy(), device=enc_dev),
+            tvm.runtime.tensor(text_mask.numpy(), device=enc_dev),
+        ]
+        t_en_tvm = self._unwrap(self.f_text_enc(*text_enc_inputs))
+        t_en = torch.from_numpy(t_en_tvm.numpy())
+        out["t_en"] = t_en_tvm.numpy()
+
+        asr = t_en @ full_aln
+        decoder_inputs = [
+            tvm.runtime.tensor(asr.numpy(), device=dec_dev),
+            tvm.runtime.tensor(f0_tvm.numpy(), device=dec_dev),
+            tvm.runtime.tensor(n_tvm.numpy(), device=dec_dev) if n_tvm is not None else n_tvm,
+            tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
+        ]
+
+        audio_tvm = self._unwrap(self.f_decoder(*decoder_inputs))
+        audio_full = audio_tvm.numpy().squeeze()
+        target_samples = min(int(audio_full.size), int(actual_audio_len) * SAMPLES_PER_FRAME)
+        out["audio_trimmed"] = audio_full[:target_samples]
+        if include_full_audio:
+            out["audio_full"] = audio_full
+
+        return out
