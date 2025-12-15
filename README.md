@@ -163,7 +163,7 @@ Kokoro’s reference PyTorch implementation uses `pack_padded_sequence` / `pad_p
 
 This enables compilation, but it changes semantics: the LSTMs run over the full static length, so padded timesteps can influence hidden/cell states (especially in bidirectional LSTMs). This can make the end-to-end audio diverge (noise-like output) even if the LSTM kernel itself is numerically accurate.
 
-More detail: `NOTES/LSTM_SEMANTICS_MISMATCH.md`.
+More detail: `NOTES/LSTM_PACKED_SEMANTICS_ISSUE.md`.
 
 ### Tracing problems across the pipeline
 

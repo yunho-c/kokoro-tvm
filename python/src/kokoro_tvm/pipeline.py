@@ -218,12 +218,14 @@ class KokoroPipeline:
         en = d.transpose(-1, -2) @ full_aln  # [B, 640, audio_len]
         self._debug("Alignment done", t3)
 
-        # F0N module: en, s -> (F0, N)
+        # F0N module: en, s, frame_lengths -> (F0, N)
         t4 = time.time()
         self._debug("Running F0N module (CPU)..." if self.hybrid else "Running F0N module...")
+        frame_lengths = torch.tensor([actual_audio_len], dtype=torch.long)
         f0n_inputs = [
             tvm.runtime.tensor(en.numpy(), device=enc_dev),
             tvm.runtime.tensor(s, device=enc_dev),
+            tvm.runtime.tensor(frame_lengths.numpy(), device=enc_dev),
         ]
         f0n_out = self.f_f0n(*f0n_inputs)
         f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out
@@ -362,6 +364,7 @@ class KokoroPipeline:
         f0n_inputs = [
             tvm.runtime.tensor(en.numpy(), device=enc_dev),
             tvm.runtime.tensor(s, device=enc_dev),
+            tvm.runtime.tensor(np.array([actual_audio_len], dtype=np.int64), device=enc_dev),
         ]
         f0n_out = self.f_f0n(*f0n_inputs)
         f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out

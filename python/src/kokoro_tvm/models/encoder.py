@@ -259,7 +259,7 @@ def create_f0n_module(
 ) -> tvm.IRModule:
     """Create Relax IRModule for ProsodyPredictor F0N computation.
 
-    This exports F0Ntrain(en, s) -> (F0, N)
+    This exports F0Ntrain(en, s, frame_lengths) -> (F0, N)
     Note: en has shape [B, d_hid + style_dim, aligned_len] = [B, 640, aligned_len]
     because DurationEncoder output includes concatenated style.
     """
@@ -300,20 +300,120 @@ def create_f0n_module(
             self.F0_proj = predictor.F0_proj
             self.N_proj = predictor.N_proj
 
-        def forward(self, en, style):
+        @staticmethod
+        def _time_mask_1d(lengths: torch.Tensor, t: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+            idx = torch.arange(t, device=device).unsqueeze(0)
+            return (idx < lengths.view(-1, 1)).to(dtype)
+
+        @classmethod
+        def _time_mask_3d(cls, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+            return cls._time_mask_1d(lengths, x.shape[-1], x.dtype, x.device).unsqueeze(1)
+
+        @classmethod
+        def _instance_norm1d_masked(
+            cls,
+            x: torch.Tensor,
+            lengths: torch.Tensor,
+            eps: float,
+            weight: torch.Tensor,
+            bias: torch.Tensor,
+        ) -> torch.Tensor:
+            mask = cls._time_mask_3d(x, lengths)
+            denom = lengths.to(dtype=x.dtype).view(-1, 1, 1)
+            denom = torch.clamp(denom, min=1.0)
+            mean = (x * mask).sum(dim=2, keepdim=True) / denom
+            var = (((x - mean) * mask) ** 2).sum(dim=2, keepdim=True) / denom
+            x_hat = (x - mean) / torch.sqrt(var + eps)
+            x_norm = x_hat * weight.view(1, -1, 1) + bias.view(1, -1, 1)
+            return x_norm * mask
+
+        @classmethod
+        def _adain1d_masked(cls, adain: torch.nn.Module, x: torch.Tensor, s: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+            h = adain.fc(s)
+            h = h.view(h.size(0), h.size(1), 1)
+            gamma, beta = torch.chunk(h, chunks=2, dim=1)
+            x_norm = cls._instance_norm1d_masked(x, lengths, adain.norm.eps, adain.norm.weight, adain.norm.bias)
+            out = (1 + gamma) * x_norm + beta
+            return out * cls._time_mask_3d(out, lengths)
+
+        @classmethod
+        def _adain_resblk1d_masked(
+            cls, block: torch.nn.Module, x: torch.Tensor, s: torch.Tensor, lengths: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            upsampled = block.upsample_type != "none"
+            lengths_out = lengths * 2 if upsampled else lengths
+
+            x_sc = block.upsample(x)
+            if block.learned_sc:
+                x_sc = block.conv1x1(x_sc)
+            x_sc = x_sc * cls._time_mask_3d(x_sc, lengths_out)
+
+            h = cls._adain1d_masked(block.norm1, x, s, lengths)
+            h = block.actv(h)
+            h = block.pool(h)
+            h = block.conv1(block.dropout(h))
+            h = cls._adain1d_masked(block.norm2, h, s, lengths_out)
+            h = block.actv(h)
+            h = block.conv2(block.dropout(h))
+
+            out = (h + x_sc) * torch.rsqrt(x.new_tensor(2.0))
+            out = out * cls._time_mask_3d(out, lengths_out)
+            return out, lengths_out
+
+        def forward(self, en, style, frame_lengths):
             # en shape: [B, d_hid + style_dim, aligned_len] = [B, 640, aligned_len]
             # transpose to [B, aligned_len, 640] for LSTM
-            self.shared.flatten_parameters()
-            x, _ = self.shared(en.transpose(-1, -2))  # [B, aligned, d_hid]
+            x_in = en.transpose(-1, -2)
+
+            if lstm_semantics == "packed":
+                from kokoro_tvm.ops.lstm_custom_op import lstm_forward_packed_bidirectional
+
+                lengths_cpu = frame_lengths if frame_lengths.device.type == "cpu" else frame_lengths.to("cpu")
+                x_t = x_in.transpose(0, 1)  # (T, B, I)
+                batch = x_t.shape[1]
+                hidden_size = self.shared.hidden_size
+                h0 = x_t.new_zeros(2, batch, hidden_size)
+                c0 = x_t.new_zeros(2, batch, hidden_size)
+
+                out_t, _, _ = lstm_forward_packed_bidirectional(
+                    x_t,
+                    lengths_cpu,
+                    h0,
+                    c0,
+                    self.shared.weight_ih_l0,
+                    self.shared.weight_hh_l0,
+                    getattr(self.shared, "bias_ih_l0", None),
+                    getattr(self.shared, "bias_hh_l0", None),
+                    self.shared.weight_ih_l0_reverse,
+                    self.shared.weight_hh_l0_reverse,
+                    getattr(self.shared, "bias_ih_l0_reverse", None),
+                    getattr(self.shared, "bias_hh_l0_reverse", None),
+                )
+                x = out_t.transpose(0, 1)
+            else:
+                self.shared.flatten_parameters()
+                x, _ = self.shared(x_in)  # [B, aligned, d_hid]
+
+            # The AdaIN blocks use InstanceNorm1d, which aggregates statistics over the time axis.
+            # To preserve dynamic-length behavior while keeping static shapes, we apply a mask and
+            # compute the normalization statistics over the valid prefix only.
+            lengths = frame_lengths.to(dtype=torch.long)
+
+            lengths_f = lengths
             F0 = x.transpose(-1, -2)
             for block in self.F0:
-                F0 = block(F0, style)
-            F0 = self.F0_proj(F0)
+                F0, lengths_f = self._adain_resblk1d_masked(block, F0, style, lengths_f)
+            F0 = self.F0_proj(F0).squeeze(1)
+            F0 = F0 * self._time_mask_1d(lengths_f, F0.shape[-1], F0.dtype, F0.device)
+
+            lengths_n = lengths
             N = x.transpose(-1, -2)
             for block in self.N:
-                N = block(N, style)
-            N = self.N_proj(N)
-            return F0.squeeze(1), N.squeeze(1)
+                N, lengths_n = self._adain_resblk1d_masked(block, N, style, lengths_n)
+            N = self.N_proj(N).squeeze(1)
+            N = N * self._time_mask_1d(lengths_n, N.shape[-1], N.dtype, N.device)
+
+            return F0, N
 
     model = F0NWrapper(predictor)
     model.eval()
@@ -324,8 +424,9 @@ def create_f0n_module(
     en_dim = d_hid + style_dim
     input_en = torch.randn(batch_size, en_dim, aligned_len)
     input_style = torch.randn(batch_size, style_dim)
+    input_frame_lengths = torch.tensor([aligned_len] * batch_size, dtype=torch.long)
 
-    return _export_and_import(model, (input_en, input_style), "f0n_forward", dump_ir)
+    return _export_and_import(model, (input_en, input_style, input_frame_lengths), "f0n_forward", dump_ir)
 
 
 def create_text_encoder_module(

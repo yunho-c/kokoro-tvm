@@ -140,7 +140,11 @@ def compile_component(name, args, target, ext):
         mod = relax.transform.AnnotateTIROpPattern()(mod)
         mod = relax.transform.DeadCodeElimination()(mod)
         mod = relax.transform.FuseOps()(mod)
-        mod = relax.transform.FuseTIR()(mod)
+        try:
+            mod = relax.transform.FuseTIR()(mod)
+        except Exception as e:
+            print(f"Warning: FuseTIR failed: {e}")
+            print("Continuing without FuseTIR...")
 
         # Apply GPU scheduling for Metal targets
         is_metal = "metal" in str(target).lower()
@@ -207,6 +211,7 @@ def validate_component(name, ex, args, target):
         # F0N expects `en` with channel dim 640 (text hidden + style features).
         inputs.append(tvm.runtime.tensor(torch.randn(1, 640, args.aligned_len).numpy().astype("float32"), device=dev))
         inputs.append(tvm.runtime.tensor(torch.randn(1, 128).numpy().astype("float32"), device=dev))
+        inputs.append(tvm.runtime.tensor(np.array([args.aligned_len], dtype=np.int64), device=dev))
 
     elif name == "text_encoder":
         func_name = "text_encoder_forward"
