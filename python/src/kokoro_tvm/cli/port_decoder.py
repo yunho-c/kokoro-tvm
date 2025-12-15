@@ -19,7 +19,7 @@ from kokoro_tvm.config import TARGET_CONFIGS, resolve_target
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Compile Kokoro Decoder to TVM with static shapes")
-    parser.add_argument("--seq-len", type=int, default=150, 
+    parser.add_argument("--seq-len", type=int, default=150,
                         help="Static sequence length for compilation (default: 150)")
     parser.add_argument("--output", type=str, default=None,
                         help="Output path for compiled library (default: decoder_compiled.<ext>)")
@@ -32,7 +32,7 @@ def main():
                         help="Skip loading pretrained weights (use random weights for faster iteration)")
     parser.add_argument("--validate", action="store_true",
                         help="Validate TVM output against PyTorch using real encoder data")
-    
+
     # Tuning arguments
     parser.add_argument("--tune", action="store_true",
                         help="Auto-tune with MetaSchedule before building")
@@ -40,33 +40,33 @@ def main():
                         help="Maximum tuning trials (default: 2000)")
     parser.add_argument("--tune-dir", type=str, default="tuning_logs",
                         help="Directory for tuning artifacts (default: tuning_logs)")
-    
+
     args = parser.parse_args()
-    
+
     # Configure debug output in extensions
     if args.debug:
         tvm_extensions.DEBUG_ENABLED = True
-    
+
     # Resolve target
     target, target_host, ext, desc = resolve_target(args.target)
-    
+
     # Set default output path based on target extension
     if args.output is None:
         args.output = f"decoder_compiled{ext}"
-    
+
     print(f"Target: {desc}")
-    
+
     # Apply patches
     apply_sinegen_patch()
-    
+
     # Compile decoder
     compile_decoder(args, target)
-    
+
     # Run validation if requested
     if args.validate:
         import platform
         is_macos_host = platform.system() == "Darwin"
-        
+
         # Validation supported for: LLVM (CPU) or metal-macos on macOS host
         if args.target == "llvm":
             from kokoro_tvm.validation import validate_decoder_against_pytorch
@@ -80,14 +80,14 @@ def main():
 
 def compile_decoder(args, target):
     """Compile the Decoder module to TVM.
-    
+
     Args:
         args: CLI arguments
         target: TVM target object
     """
     from kokoro_tvm.models import create_decoder_module
     from kokoro_tvm.models.decoder import get_decoder_config
-    
+
     # Create Relax module using shared function
     mod = create_decoder_module(
         seq_len=args.seq_len,
@@ -95,7 +95,7 @@ def compile_decoder(args, target):
         func_name="decoder_forward",
         dump_ir="decoder_before_opt.py",
     )
-    
+
     # Get config for verification later
     config = get_decoder_config()
     hidden_dim = config['hidden_dim']
@@ -104,20 +104,20 @@ def compile_decoder(args, target):
     # Compile
     print(f"Compiling for target: {target}")
     is_metal = "metal" in str(target).lower()
-    
+
     with target:
         print("Running DecomposeOpsForInference...")
         mod = relax.transform.DecomposeOpsForInference()(mod)
-        with open("decoder_decomposed.py", "w") as f: 
+        with open("decoder_decomposed.py", "w") as f:
             f.write(mod.script())
         print("Dumped decoder_decomposed.py")
 
         print("Running LegalizeOps...")
         mod = relax.transform.LegalizeOps()(mod)
-        with open("decoder_legalized.py", "w") as f: 
+        with open("decoder_legalized.py", "w") as f:
             f.write(mod.script())
         print("Dumped decoder_legalized.py")
-        
+
         # Auto-tune with MetaSchedule if requested
         if args.tune:
             print(f"\nStarting MetaSchedule tuning (max_trials={args.tune_trials})...")
@@ -138,10 +138,10 @@ def compile_decoder(args, target):
 
         print("Running FoldConstant...")
         # mod = relax.transform.FoldConstant()(mod)
-        
+
         print("Running FuseOps...")
         mod = relax.transform.FuseOps()(mod)
-        
+
         print("Running FuseTIR...")
         mod = relax.transform.FuseTIR()(mod)
 
@@ -175,28 +175,28 @@ def compile_decoder(args, target):
     with tvm.transform.PassContext(opt_level=3, config={"tir.enable_debug": False}):
         ex = relax.build(mod, target)
     print("Compilation successful!")
-    
+
     # Save compiled library
     output_path = args.output
     ex.export_library(output_path)
     print(f"Saved compiled library to: {output_path}")
-    
+
     # Quick verification
     # For Metal targets: only run on macOS host for metal-macos, skip iOS
     import platform
     is_macos_host = platform.system() == "Darwin"
     is_ios_target = "ios" in str(target).lower()
-    
+
     if is_metal and is_ios_target:
         print("Skipping verification for iOS target (requires iOS device).")
         print("Compilation Successful!")
         return
-    
+
     if is_metal and not is_macos_host:
         print("Skipping verification for Metal target (requires macOS host).")
         print("Compilation Successful!")
         return
-    
+
     # Select device: Metal GPU for metal-macos on macOS, else CPU
     if is_metal and is_macos_host:
         # Check if Metal runtime is available
@@ -212,25 +212,25 @@ def compile_decoder(args, target):
             return
     else:
         dev = tvm.cpu()
-    
+
     vm = relax.VirtualMachine(ex, dev)
-    
+
     test_len = args.seq_len
     asr_in = torch.randn(1, hidden_dim, test_len).numpy()
     f0_in = torch.randn(1, test_len * 2).numpy()
     n_in = torch.randn(1, test_len * 2).numpy()
     s_in = torch.randn(1, style_dim).numpy()
-    
+
     inputs = [
         tvm.runtime.tensor(asr_in, device=dev),
         tvm.runtime.tensor(f0_in, device=dev),
         tvm.runtime.tensor(n_in, device=dev),
         tvm.runtime.tensor(s_in, device=dev)
     ]
-    
+
     print(f"Running inference with test_len={test_len}...")
     output = vm["decoder_forward"](*inputs)
-    
+
     if hasattr(output, 'shape'):
         print("Output shape:", output.shape)
     else:

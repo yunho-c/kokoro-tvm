@@ -16,6 +16,11 @@ STATIC_TEXT_LEN = 512
 STATIC_AUDIO_LEN = 5120
 STYLE_DIM = 128  # Kokoro-82M uses 128
 
+# Duration/alignment is in decoder frames, but decoder returns waveform samples.
+# For Kokoro-82M, each decoder frame corresponds to 600 samples at 24kHz:
+# 2 (F0/N are 2x frames) * prod(upsample_rates=10*6) * gen_istft_hop_size=5.
+SAMPLES_PER_FRAME = 600
+
 # Debug flag - set to True to enable timing prints
 DEBUG = True
 
@@ -135,6 +140,9 @@ class KokoroPipeline:
         t0 = time.time()
         self._debug("Starting inference...")
 
+        enc_dev = self.cpu_dev if self.hybrid else self.gpu_dev
+        dec_dev = self.gpu_dev
+
         # Preprocess Inputs
         cur_len = input_ids.shape[1]
         if cur_len > STATIC_TEXT_LEN:
@@ -152,34 +160,34 @@ class KokoroPipeline:
         input_lengths = torch.tensor([cur_len], dtype=torch.long)
         self._debug("Preprocessing done", t0)
 
-        # 1. Run BERT: input_ids, attention_mask -> d_en [B, 512, seq_len]
+        # Run BERT: input_ids, attention_mask -> d_en [B, 512, seq_len]
         t1 = time.time()
         self._debug("Running BERT (CPU)..." if self.hybrid else "Running BERT...")
         bert_inputs = [
-            tvm.runtime.tensor(input_ids.numpy(), device=self.cpu_dev),
-            tvm.runtime.tensor(attention_mask.numpy(), device=self.cpu_dev),
+            tvm.runtime.tensor(input_ids.numpy(), device=enc_dev),
+            tvm.runtime.tensor(attention_mask.numpy(), device=enc_dev),
         ]
         d_en_tvm = self._unwrap(self.f_bert(*bert_inputs))
         self._debug("BERT done", t1)
 
-        # 2. Style: ref_s[:, 128:] -> s [B, 128]
+        # Style: ref_s[:, 128:] -> s [B, 128]
         s = ref_s[:, 128:].numpy()
 
-        # 3. Duration module: d_en, s, lengths, mask -> (duration, d)
+        # Duration module: d_en, s, lengths, mask -> (duration, d)
         t2 = time.time()
         self._debug("Running Duration module (CPU)..." if self.hybrid else "Running Duration module...")
         duration_inputs = [
             d_en_tvm,
-            tvm.runtime.tensor(s, device=self.cpu_dev),
-            tvm.runtime.tensor(input_lengths.numpy(), device=self.cpu_dev),
-            tvm.runtime.tensor(text_mask.numpy(), device=self.cpu_dev),
+            tvm.runtime.tensor(s, device=enc_dev),
+            tvm.runtime.tensor(input_lengths.numpy(), device=enc_dev),
+            tvm.runtime.tensor(text_mask.numpy(), device=enc_dev),
         ]
         duration_out = self.f_duration(*duration_inputs)
         duration_tvm = self._unwrap(duration_out[0]) if hasattr(duration_out, "__getitem__") else duration_out
         d_tvm = duration_out[1] if hasattr(duration_out, "__getitem__") and len(duration_out) > 1 else None
         self._debug("Duration done", t2)
 
-        # 4. Alignment logic (Python)
+        # Alignment logic (Python)
         t3 = time.time()
         self._debug("Computing alignment...")
         duration = torch.from_numpy(duration_tvm.numpy()).float()
@@ -204,40 +212,40 @@ class KokoroPipeline:
         full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
         full_aln[0, :cur_len, :] = pred_aln_trg[0]
 
-        # 5. Compute en = d.T @ alignment
+        # Compute en = d.T @ alignment
         # d is [B, T, d_hid + style_dim] = [B, T, 640] from DurationEncoder
         d = torch.from_numpy(d_tvm.numpy()) if d_tvm is not None else torch.zeros(1, STATIC_TEXT_LEN, 640)
         en = d.transpose(-1, -2) @ full_aln  # [B, 640, audio_len]
         self._debug("Alignment done", t3)
 
-        # 6. F0N module: en, s -> (F0, N)
+        # F0N module: en, s -> (F0, N)
         t4 = time.time()
         self._debug("Running F0N module (CPU)..." if self.hybrid else "Running F0N module...")
         f0n_inputs = [
-            tvm.runtime.tensor(en.numpy(), device=self.cpu_dev),
-            tvm.runtime.tensor(s, device=self.cpu_dev),
+            tvm.runtime.tensor(en.numpy(), device=enc_dev),
+            tvm.runtime.tensor(s, device=enc_dev),
         ]
         f0n_out = self.f_f0n(*f0n_inputs)
         f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out
         n_tvm = f0n_out[1] if hasattr(f0n_out, "__getitem__") and len(f0n_out) > 1 else None
         self._debug("F0N done", t4)
 
-        # 7. Text Encoder: input_ids, lengths, mask -> t_en
+        # Text Encoder: input_ids, lengths, mask -> t_en
         t5 = time.time()
         self._debug("Running Text Encoder (CPU)..." if self.hybrid else "Running Text Encoder...")
         text_enc_inputs = [
-            tvm.runtime.tensor(input_ids.numpy(), device=self.cpu_dev),
-            tvm.runtime.tensor(input_lengths.numpy(), device=self.cpu_dev),
-            tvm.runtime.tensor(text_mask.numpy(), device=self.cpu_dev),
+            tvm.runtime.tensor(input_ids.numpy(), device=enc_dev),
+            tvm.runtime.tensor(input_lengths.numpy(), device=enc_dev),
+            tvm.runtime.tensor(text_mask.numpy(), device=enc_dev),
         ]
         t_en_tvm = self._unwrap(self.f_text_enc(*text_enc_inputs))
         t_en = torch.from_numpy(t_en_tvm.numpy())
         self._debug("Text Encoder done", t5)
 
-        # 8. ASR = t_en @ alignment
+        # ASR = t_en @ alignment
         asr = t_en @ full_aln
 
-        # 9. Decoder: asr, F0, N, style[:128] -> audio
+        # Decoder: asr, F0, N, style[:128] -> audio
         t6 = time.time()
         self._debug("Running Decoder (GPU)..." if self.hybrid else "Running Decoder...")
 
@@ -246,17 +254,17 @@ class KokoroPipeline:
             f0_np = f0_tvm.numpy()
             n_np = n_tvm.numpy() if n_tvm is not None else None
             decoder_inputs = [
-                tvm.runtime.tensor(asr.numpy(), device=self.gpu_dev),
-                tvm.runtime.tensor(f0_np, device=self.gpu_dev),
-                tvm.runtime.tensor(n_np, device=self.gpu_dev) if n_np is not None else n_tvm,
-                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=self.gpu_dev),
+                tvm.runtime.tensor(asr.numpy(), device=dec_dev),
+                tvm.runtime.tensor(f0_np, device=dec_dev),
+                tvm.runtime.tensor(n_np, device=dec_dev) if n_np is not None else n_tvm,
+                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
             ]
         else:
             decoder_inputs = [
-                tvm.runtime.tensor(asr.numpy(), device=self.cpu_dev),
-                f0_tvm,
-                n_tvm,
-                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=self.cpu_dev),
+                tvm.runtime.tensor(asr.numpy(), device=dec_dev),
+                tvm.runtime.tensor(f0_tvm.numpy(), device=dec_dev),
+                tvm.runtime.tensor(n_tvm.numpy(), device=dec_dev) if n_tvm is not None else n_tvm,
+                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
             ]
 
         audio_tvm = self._unwrap(self.f_decoder(*decoder_inputs))
@@ -264,5 +272,7 @@ class KokoroPipeline:
         self._debug("Decoder done", t6)
 
         self._debug("Total inference time", t0)
-        # Trim to actual audio length
-        return audio.squeeze()[:actual_audio_len]
+        # Trim to actual waveform length (convert frames -> samples).
+        audio_1d = audio.squeeze()
+        target_samples = min(int(audio_1d.numel()), int(actual_audio_len) * SAMPLES_PER_FRAME)
+        return audio_1d[:target_samples]

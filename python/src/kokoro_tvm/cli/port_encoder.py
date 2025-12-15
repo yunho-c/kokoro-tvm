@@ -32,6 +32,11 @@ def main():
     )
     parser.add_argument("--validate", action="store_true", help="Run basic execution check after compilation")
     parser.add_argument(
+        "--no-weights",
+        action="store_true",
+        help="Skip loading pretrained weights (use random weights for faster iteration)",
+    )
+    parser.add_argument(
         "--lstm-method",
         type=str,
         default="topi",
@@ -89,16 +94,28 @@ def compile_component(name, args, target, ext):
     mod = None
 
     if name == "bert":
-        mod = create_bert_module(dump_ir=f"{args.output_dir}/bert_ir.py")
+        mod = create_bert_module(load_weights=not args.no_weights, dump_ir=f"{args.output_dir}/bert_ir.py")
 
     elif name == "duration":
-        mod = create_duration_module(seq_len=args.seq_len, dump_ir=f"{args.output_dir}/duration_ir.py")
+        mod = create_duration_module(
+            seq_len=args.seq_len,
+            load_weights=not args.no_weights,
+            dump_ir=f"{args.output_dir}/duration_ir.py",
+        )
 
     elif name == "f0n":
-        mod = create_f0n_module(aligned_len=args.aligned_len, dump_ir=f"{args.output_dir}/f0n_ir.py")
+        mod = create_f0n_module(
+            aligned_len=args.aligned_len,
+            load_weights=not args.no_weights,
+            dump_ir=f"{args.output_dir}/f0n_ir.py",
+        )
 
     elif name == "text_encoder":
-        mod = create_text_encoder_module(seq_len=args.seq_len, dump_ir=f"{args.output_dir}/text_encoder_ir.py")
+        mod = create_text_encoder_module(
+            seq_len=args.seq_len,
+            load_weights=not args.no_weights,
+            dump_ir=f"{args.output_dir}/text_encoder_ir.py",
+        )
 
     if mod is None:
         print(f"Error creating module for {name}")
@@ -159,8 +176,13 @@ def validate_component(name, ex, args, target):
     func_name = ""
 
     if name == "bert":
+        from kokoro_tvm.models.encoder import get_kokoro_config
+
+        cfg = get_kokoro_config()
         func_name = "bert_forward"
-        inputs.append(tvm.runtime.tensor(torch.randint(0, 100, (1, 512), dtype=torch.long).numpy(), device=dev))
+        inputs.append(
+            tvm.runtime.tensor(torch.randint(0, cfg["n_token"], (1, 512), dtype=torch.long).numpy(), device=dev)
+        )
         inputs.append(tvm.runtime.tensor(torch.ones((1, 512), dtype=torch.long).numpy(), device=dev))
 
     elif name == "duration":
