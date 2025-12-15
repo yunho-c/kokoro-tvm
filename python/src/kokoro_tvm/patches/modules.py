@@ -15,6 +15,60 @@ _text_encoder_patched = False
 _prosody_predictor_patched = False
 _duration_encoder_patched = False
 _adain_patched = False
+_text_encoder_packed_patched = False
+_prosody_predictor_packed_patched = False
+_duration_encoder_packed_patched = False
+
+
+def _get_lstm_weights(lstm_module: torch.nn.Module):
+    """Return common LSTM parameter tensors from either nn.LSTM or our wrappers."""
+    return (
+        lstm_module.weight_ih_l0,
+        lstm_module.weight_hh_l0,
+        getattr(lstm_module, "bias_ih_l0", None),
+        getattr(lstm_module, "bias_hh_l0", None),
+    )
+
+
+def _get_lstm_reverse_weights(lstm_module: torch.nn.Module):
+    return (
+        lstm_module.weight_ih_l0_reverse,
+        lstm_module.weight_hh_l0_reverse,
+        getattr(lstm_module, "bias_ih_l0_reverse", None),
+        getattr(lstm_module, "bias_hh_l0_reverse", None),
+    )
+
+
+def _run_packed_bidir_lstm(
+    lstm_module: torch.nn.Module, x_batch_first: torch.Tensor, lengths: torch.Tensor
+) -> torch.Tensor:
+    from kokoro_tvm.ops.lstm_custom_op import lstm_forward_packed_bidirectional
+
+    lengths_cpu = lengths if lengths.device.type == "cpu" else lengths.to("cpu")
+    x_t = x_batch_first.transpose(0, 1)  # (T, B, I)
+    batch = x_t.shape[1]
+    hidden_size = lstm_module.hidden_size
+    h0 = x_t.new_zeros(2, batch, hidden_size)
+    c0 = x_t.new_zeros(2, batch, hidden_size)
+
+    wih, whh, bih, bhh = _get_lstm_weights(lstm_module)
+    wih_r, whh_r, bih_r, bhh_r = _get_lstm_reverse_weights(lstm_module)
+
+    out_t, _, _ = lstm_forward_packed_bidirectional(
+        x_t,
+        lengths_cpu,
+        h0,
+        c0,
+        wih,
+        whh,
+        bih,
+        bhh,
+        wih_r,
+        whh_r,
+        bih_r,
+        bhh_r,
+    )
+    return out_t.transpose(0, 1)
 
 
 def apply_text_encoder_patch():
@@ -50,6 +104,37 @@ def apply_text_encoder_patch():
     _text_encoder_patched = True
 
 
+def apply_text_encoder_packed_lstm_patch():
+    """Patch TextEncoder to preserve length semantics without PackedSequence objects."""
+    global _text_encoder_packed_patched
+    if _text_encoder_packed_patched:
+        return
+
+    from kokoro.modules import TextEncoder
+
+    def text_encoder_forward(self, x, input_lengths, m):
+        x = self.embedding(x)  # [B, T, emb]
+        x = x.transpose(1, 2)  # [B, emb, T]
+        m = m.unsqueeze(1)
+        x.masked_fill_(m, 0.0)
+        for c in self.cnn:
+            x = c(x)
+            x.masked_fill_(m, 0.0)
+        x = x.transpose(1, 2)  # [B, T, chn]
+
+        x = _run_packed_bidir_lstm(self.lstm, x, input_lengths)  # [B, T, chn]
+
+        x = x.transpose(-1, -2)
+        x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
+        x_pad[:, :, : x.shape[-1]] = x
+        x = x_pad
+        x.masked_fill_(m, 0.0)
+        return x
+
+    TextEncoder.forward = text_encoder_forward
+    _text_encoder_packed_patched = True
+
+
 def apply_prosody_predictor_patch():
     """Patch ProsodyPredictor to remove pack/unpack operations."""
     global _prosody_predictor_patched
@@ -75,6 +160,31 @@ def apply_prosody_predictor_patch():
 
     ProsodyPredictor.forward = prosody_predictor_forward
     _prosody_predictor_patched = True
+
+
+def apply_prosody_predictor_packed_lstm_patch():
+    """Patch ProsodyPredictor to preserve length semantics without PackedSequence objects."""
+    global _prosody_predictor_packed_patched
+    if _prosody_predictor_packed_patched:
+        return
+
+    from kokoro.modules import ProsodyPredictor
+
+    def prosody_predictor_forward(self, texts, style, text_lengths, alignment, m):
+        d = self.text_encoder(texts, style, text_lengths, m)
+        m = m.unsqueeze(1)
+
+        x = _run_packed_bidir_lstm(self.lstm, d, text_lengths)
+
+        x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]], device=x.device)
+        x_pad[:, : x.shape[1], :] = x
+        x = x_pad
+        duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=False))
+        en = (d.transpose(-1, -2) @ alignment)
+        return duration.squeeze(-1), en
+
+    ProsodyPredictor.forward = prosody_predictor_forward
+    _prosody_predictor_packed_patched = True
 
 
 def apply_duration_encoder_patch():
@@ -116,6 +226,43 @@ def apply_duration_encoder_patch():
     _duration_encoder_patched = True
 
 
+def apply_duration_encoder_packed_lstm_patch():
+    """Patch DurationEncoder to preserve length semantics without PackedSequence objects."""
+    global _duration_encoder_packed_patched
+    if _duration_encoder_packed_patched:
+        return
+
+    from kokoro.modules import AdaLayerNorm, DurationEncoder
+
+    def duration_encoder_forward(self, x, style, text_lengths, m):
+        masks = m
+        x = x.permute(2, 0, 1)
+        s = style.expand(x.shape[0], x.shape[1], -1)
+        x = torch.cat([x, s], axis=-1)
+        x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
+        x = x.transpose(0, 1)
+        x = x.transpose(-1, -2)
+        for block in self.lstms:
+            if isinstance(block, AdaLayerNorm):
+                x = block(x.transpose(-1, -2), style).transpose(-1, -2)
+                x = torch.cat([x, s.permute(1, 2, 0)], axis=1)
+                x.masked_fill_(masks.unsqueeze(-1).transpose(-1, -2), 0.0)
+            else:
+                x_bt = x.transpose(-1, -2)  # [B, T, I]
+                x_bt = _run_packed_bidir_lstm(block, x_bt, text_lengths)
+                x_bt = F.dropout(x_bt, p=self.dropout, training=False)
+
+                x = x_bt.transpose(-1, -2)
+                x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
+                x_pad[:, :, : x.shape[-1]] = x
+                x = x_pad
+
+        return x.transpose(-1, -2)
+
+    DurationEncoder.forward = duration_encoder_forward
+    _duration_encoder_packed_patched = True
+
+
 def apply_adain_patch():
     """Patch AdaIN1d.forward to handle dynamic shape check."""
     global _adain_patched
@@ -144,4 +291,12 @@ def apply_all_module_patches():
     apply_text_encoder_patch()
     apply_prosody_predictor_patch()
     apply_duration_encoder_patch()
+    apply_adain_patch()
+
+
+def apply_all_module_patches_packed_lstm():
+    """Apply all module patches using the packed-LSTM custom ops."""
+    apply_text_encoder_packed_lstm_patch()
+    apply_prosody_predictor_packed_lstm_patch()
+    apply_duration_encoder_packed_lstm_patch()
     apply_adain_patch()

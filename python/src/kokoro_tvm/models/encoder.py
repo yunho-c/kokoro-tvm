@@ -9,7 +9,7 @@ components (BERT, ProsodyPredictor, TextEncoder).
 
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import torch
 import tvm
@@ -24,11 +24,11 @@ from kokoro_tvm import tvm_extensions  # noqa: F401
 from kokoro_tvm.ops.lstm_custom_op import patch_lstm_modules as apply_lstm_custom_op_patch
 from kokoro_tvm.patches.lstm import apply_lstm_patch
 
-_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
-_CHECKPOINT_CACHE: Dict[str, Dict[str, Any]] = {}
+_CONFIG_CACHE: dict[str, dict[str, Any]] = {}
+_CHECKPOINT_CACHE: dict[str, dict[str, Any]] = {}
 
 
-def get_kokoro_config() -> Dict[str, Any]:
+def get_kokoro_config() -> dict[str, Any]:
     """Get the full Kokoro model configuration."""
     repo_id = "hexgrad/Kokoro-82M"
     if repo_id in _CONFIG_CACHE:
@@ -40,7 +40,7 @@ def get_kokoro_config() -> Dict[str, Any]:
     return cfg
 
 
-def _load_kokoro_checkpoint(repo_id: str = "hexgrad/Kokoro-82M") -> Dict[str, Any]:
+def _load_kokoro_checkpoint(repo_id: str = "hexgrad/Kokoro-82M") -> dict[str, Any]:
     if repo_id in _CHECKPOINT_CACHE:
         return _CHECKPOINT_CACHE[repo_id]
     checkpoint_path = hf_hub_download(repo_id=repo_id, filename="kokoro-v1_0.pth")
@@ -49,7 +49,7 @@ def _load_kokoro_checkpoint(repo_id: str = "hexgrad/Kokoro-82M") -> Dict[str, An
     return state
 
 
-def _load_state_dict(module: torch.nn.Module, state_dict: Dict[str, Any], name: str) -> None:
+def _load_state_dict(module: torch.nn.Module, state_dict: dict[str, Any], name: str) -> None:
     try:
         module.load_state_dict(state_dict)
         return
@@ -64,7 +64,7 @@ def _load_state_dict(module: torch.nn.Module, state_dict: Dict[str, Any], name: 
 
 
 def _export_and_import(
-    model: torch.nn.Module, args: Tuple[Any, ...], func_name: str, dump_ir: Optional[str] = None
+    model: torch.nn.Module, args: tuple[Any, ...], func_name: str, dump_ir: str | None = None
 ) -> tvm.IRModule:
     """Helper to export PyTorch model and import to TVM Relax."""
 
@@ -103,7 +103,7 @@ def _export_and_import(
     return mod
 
 
-def create_bert_module(load_weights: bool = True, dump_ir: Optional[str] = None) -> tvm.IRModule:
+def create_bert_module(load_weights: bool = True, dump_ir: str | None = None) -> tvm.IRModule:
     """Create Relax IRModule for CustomAlbert with Linear projection."""
 
     print("Initializing CustomAlbert...")
@@ -147,7 +147,8 @@ def create_duration_module(
     dropout: float = 0.0,
     seq_len: int = 512,
     load_weights: bool = True,
-    dump_ir: Optional[str] = None,
+    dump_ir: str | None = None,
+    lstm_semantics: str = "padded",
 ) -> tvm.IRModule:
     """Create Relax IRModule for ProsodyPredictor duration computation.
 
@@ -170,7 +171,12 @@ def create_duration_module(
         state = _load_kokoro_checkpoint()
         _load_state_dict(predictor, state["predictor"], "predictor")
 
-    apply_lstm_patch()
+    if lstm_semantics == "packed":
+        from kokoro_tvm.patches.modules import apply_all_module_patches_packed_lstm
+
+        apply_all_module_patches_packed_lstm()
+    else:
+        apply_lstm_patch()
 
     # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
     apply_lstm_custom_op_patch(predictor)
@@ -189,9 +195,35 @@ def create_duration_module(
             # text_encoder returns d: [B, T, d_hid + style_dim] = [B, T, 640]
             d = self.text_encoder(d_en, style, text_lengths, m)
 
-            # LSTM already expects [B, T, input_size] which d is
-            self.lstm.flatten_parameters()
-            x, _ = self.lstm(d)
+            if lstm_semantics == "packed":
+                from kokoro_tvm.ops.lstm_custom_op import lstm_forward_packed_bidirectional
+
+                lengths_cpu = text_lengths if text_lengths.device.type == "cpu" else text_lengths.to("cpu")
+                x_t = d.transpose(0, 1)  # (T, B, I)
+                batch = x_t.shape[1]
+                hidden_size = self.lstm.hidden_size
+                h0 = x_t.new_zeros(2, batch, hidden_size)
+                c0 = x_t.new_zeros(2, batch, hidden_size)
+
+                out_t, _, _ = lstm_forward_packed_bidirectional(
+                    x_t,
+                    lengths_cpu,
+                    h0,
+                    c0,
+                    self.lstm.weight_ih_l0,
+                    self.lstm.weight_hh_l0,
+                    getattr(self.lstm, "bias_ih_l0", None),
+                    getattr(self.lstm, "bias_hh_l0", None),
+                    self.lstm.weight_ih_l0_reverse,
+                    self.lstm.weight_hh_l0_reverse,
+                    getattr(self.lstm, "bias_ih_l0_reverse", None),
+                    getattr(self.lstm, "bias_hh_l0_reverse", None),
+                )
+                x = out_t.transpose(0, 1)
+            else:
+                # LSTM already expects [B, T, input_size] which d is
+                self.lstm.flatten_parameters()
+                x, _ = self.lstm(d)
 
             # Pad to static length
             x_pad = torch.zeros([x.shape[0], self.seq_len, x.shape[-1]], device=x.device)
@@ -222,7 +254,8 @@ def create_f0n_module(
     dropout: float = 0.0,
     aligned_len: int = 5120,
     load_weights: bool = True,
-    dump_ir: Optional[str] = None,
+    dump_ir: str | None = None,
+    lstm_semantics: str = "padded",
 ) -> tvm.IRModule:
     """Create Relax IRModule for ProsodyPredictor F0N computation.
 
@@ -246,7 +279,12 @@ def create_f0n_module(
         state = _load_kokoro_checkpoint()
         _load_state_dict(predictor, state["predictor"], "predictor")
 
-    apply_lstm_patch()
+    if lstm_semantics == "packed":
+        from kokoro_tvm.patches.modules import apply_all_module_patches_packed_lstm
+
+        apply_all_module_patches_packed_lstm()
+    else:
+        apply_lstm_patch()
 
     # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
     apply_lstm_custom_op_patch(predictor)
@@ -297,7 +335,8 @@ def create_text_encoder_module(
     n_symbols: int = 178,
     seq_len: int = 50,
     load_weights: bool = True,
-    dump_ir: Optional[str] = None,
+    dump_ir: str | None = None,
+    lstm_semantics: str = "padded",
 ) -> tvm.IRModule:
     """Create Relax IRModule for TextEncoder."""
 
@@ -316,7 +355,12 @@ def create_text_encoder_module(
         state = _load_kokoro_checkpoint()
         _load_state_dict(model, state["text_encoder"], "text_encoder")
 
-    apply_lstm_patch()
+    if lstm_semantics == "packed":
+        from kokoro_tvm.patches.modules import apply_all_module_patches_packed_lstm
+
+        apply_all_module_patches_packed_lstm()
+    else:
+        apply_lstm_patch()
 
     # Replace nn.LSTM with our custom op wrapper to preserve as single node during export
     apply_lstm_custom_op_patch(model)

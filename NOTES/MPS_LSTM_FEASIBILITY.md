@@ -82,6 +82,42 @@ Apple provides **first-party LSTM support** in Metal Performance Shaders:
 - ✅ Works with **float32** and **float16**
 - ✅ Optimized for Apple Silicon (M1/M2/M3)
 
+## Variable-length sequences (PackedSequence-equivalent behavior)
+
+`MPSRNNMatrixInferenceLayer` supports variable-length sequences without requiring a per-sample `lengths` argument. Instead, it supports **ragged batches** by allowing the per-timestep `MPSMatrix` objects to have a **decreasing number of rows**.
+
+This is effectively the same representation as PyTorch’s `PackedSequence` (`batch_sizes` decreases over time when sequences are sorted by length).
+
+From Apple’s API docs (see `MPSRNNLayer.h` in the macOS SDK), the intended packing for three sequences of different lengths:
+
+```
+( x1, x2, x3 ), ( y1, y2, y3, y4 ), ( z1, z2 )
+
+( y1 )        ( y2 )        ( y3 )        ( y4 )
+( x1 ),  ( x2 ),  ( x3 ),  
+( z1 )        ( z2 )
+```
+
+Crucially, the docs state that if intermediate states are requested, “shorter sequences will be propagated by copying the state of the previous output if the input vector is not present in the sequence”. This matches the key property we need for Kokoro: padded timesteps should not update recurrent state.
+
+This means a “true packing semantics” GPU path is feasible on MPS if we can supply the LSTM op with:
+- a packed/ragged sequence view (decreasing rows over time), or
+- enough information (e.g., `lengths`) for the runtime to construct that packed view.
+
+## Implications for kokoro-tvm (Option B feasibility)
+
+kokoro-tvm currently calls `MPSRNNMatrixInferenceLayer.encodeSequenceToCommandBuffer(...)` with **fixed row-count matrices** (`rows = batch` for every timestep) in `reference/tvm/src/runtime/contrib/mps/lstm.mm`, which is equivalent to “no-pack” semantics and explains why bidirectional LSTMs diverge when padding is present.
+
+To pursue Option B (length-aware LSTM on GPU using MPS), the most promising direction is to extend the existing `tvm.contrib.mps.lstm` extern path to accept variable-length information and then use **ragged matrices**:
+
+- **Best semantic match:** add a new entrypoint (e.g., `tvm.contrib.mps.lstm_packed`) that accepts either:
+  - `batch_sizes: int32[T]` (exactly like PyTorch PackedSequence), or
+  - `lengths: int32[B]` (runtime computes `batch_sizes` + sorting/permutation if needed).
+- Use `encodeSequenceToCommandBuffer` (or `encodeBidirectionalSequenceToCommandBuffer` for bidirectional) with per-timestep matrices whose `rows = batch_sizes[t]`.
+- Pre-zero the padded output buffer so “missing rows” naturally become zeros in the padded `[B, T, H]` output.
+
+The remaining hard part is not MPS capability, but the **graph/export plumbing**: the current compiled graphs do not pass `lengths` into the `aten::lstm` call. To make Option B usable end-to-end, we’ll likely need to preserve `lengths` through export (e.g., by replacing the `pack_padded_sequence → lstm → pad_packed_sequence` block with an explicit custom “packed LSTM” op that takes `x` and `lengths` as inputs, which TVM can lower to the MPS packed path).
+
 ### MPSLSTMDescriptor Configuration
 
 From Apple documentation, the LSTM operation follows:

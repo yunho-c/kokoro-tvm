@@ -154,3 +154,36 @@ py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component duration --target
 py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component text_encoder --target metal-macos --lstm-method mps --seq-len 512 --validate
 py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component f0n --target metal-macos --lstm-method mps --aligned-len 5120 --validate
 ```
+
+## Validation and Known Issues
+
+### PackedSequence semantics and LSTMs
+
+Kokoro’s reference PyTorch implementation uses `pack_padded_sequence` / `pad_packed_sequence` to make LSTMs length-aware. For TVM export, kokoro-tvm currently monkeypatches these to identity functions (padded tensors in, padded tensors out) to keep the graph static.
+
+This enables compilation, but it changes semantics: the LSTMs run over the full static length, so padded timesteps can influence hidden/cell states (especially in bidirectional LSTMs). This can make the end-to-end audio diverge (noise-like output) even if the LSTM kernel itself is numerically accurate.
+
+More detail: `NOTES/LSTM_SEMANTICS_MISMATCH.md`.
+
+### Tracing problems across the pipeline
+
+Use the step validator to compare:
+- Reference PyTorch (dynamic, with packing)
+- PyTorch static (with packing disabled)
+- TVM outputs at each major step
+
+```bash
+py -3.12 python/src/kokoro_tvm/cli/validate_steps.py --text "Hello world" --device metal --lib-dir tvm_output --save-dir logs/step_validation
+```
+
+For a simpler end-to-end check (final waveform only):
+
+```bash
+py -3.12 python/src/kokoro_tvm/cli/validate_e2e.py --text "Hello world" --device metal --lib-dir tvm_output --save-dir logs/e2e_validation
+```
+
+### Correctness-first fix direction
+
+To match reference Kokoro behavior, the exported LSTMs need to become length-aware again. The most direct approach is to implement a length-aware LSTM for the encoder components (duration/text_encoder/f0n) that accepts per-sample sequence lengths and freezes recurrence after the valid region (including the reverse direction of bidirectional LSTMs).
+
+See `docs/component_analysis.md` and `NOTES/RELAX_LSTM_FIX_PROPOSAL.md` for implementation options.

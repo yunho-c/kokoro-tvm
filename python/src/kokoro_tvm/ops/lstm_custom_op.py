@@ -11,7 +11,7 @@ Supports both unidirectional and bidirectional single-layer LSTMs.
 The custom ops are then converted to our TIR LSTM implementation in TVM.
 """
 
-from typing import Optional, Tuple
+from __future__ import annotations
 
 import torch
 from torch import Tensor
@@ -19,6 +19,8 @@ from torch import Tensor
 # Define custom op namespaces
 LSTM_OP_NAME = "kokoro::lstm_forward"
 LSTM_BIDIR_OP_NAME = "kokoro::lstm_forward_bidirectional"
+LSTM_PACKED_OP_NAME = "kokoro::lstm_forward_packed"
+LSTM_PACKED_BIDIR_OP_NAME = "kokoro::lstm_forward_packed_bidirectional"
 
 
 @torch.library.custom_op(LSTM_OP_NAME, mutates_args=())
@@ -28,9 +30,9 @@ def lstm_forward(
     c0: Tensor,
     weight_ih_l0: Tensor,
     weight_hh_l0: Tensor,
-    bias_ih_l0: Optional[Tensor],
-    bias_hh_l0: Optional[Tensor],
-) -> Tuple[Tensor, Tensor, Tensor]:
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Custom unidirectional LSTM forward op that stays opaque during torch.export.
 
     Args:
@@ -80,9 +82,9 @@ def _(
     c0: Tensor,
     weight_ih_l0: Tensor,
     weight_hh_l0: Tensor,
-    bias_ih_l0: Optional[Tensor],
-    bias_hh_l0: Optional[Tensor],
-) -> Tuple[Tensor, Tensor, Tensor]:
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Fake kernel for symbolic tracing (unidirectional)."""
     seq_len, batch, input_size = input.shape
     hidden_size = weight_hh_l0.shape[1]
@@ -106,13 +108,13 @@ def lstm_forward_bidirectional(
     c0: Tensor,
     weight_ih_l0: Tensor,
     weight_hh_l0: Tensor,
-    bias_ih_l0: Optional[Tensor],
-    bias_hh_l0: Optional[Tensor],
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
     weight_ih_l0_reverse: Tensor,
     weight_hh_l0_reverse: Tensor,
-    bias_ih_l0_reverse: Optional[Tensor],
-    bias_hh_l0_reverse: Optional[Tensor],
-) -> Tuple[Tensor, Tensor, Tensor]:
+    bias_ih_l0_reverse: Tensor | None,
+    bias_hh_l0_reverse: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Custom bidirectional LSTM forward op that stays opaque during torch.export.
 
     Args:
@@ -181,13 +183,13 @@ def _(
     c0: Tensor,
     weight_ih_l0: Tensor,
     weight_hh_l0: Tensor,
-    bias_ih_l0: Optional[Tensor],
-    bias_hh_l0: Optional[Tensor],
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
     weight_ih_l0_reverse: Tensor,
     weight_hh_l0_reverse: Tensor,
-    bias_ih_l0_reverse: Optional[Tensor],
-    bias_hh_l0_reverse: Optional[Tensor],
-) -> Tuple[Tensor, Tensor, Tensor]:
+    bias_ih_l0_reverse: Tensor | None,
+    bias_hh_l0_reverse: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Fake kernel for symbolic tracing (bidirectional)."""
     seq_len, batch, input_size = input.shape
     hidden_size = weight_hh_l0.shape[1]
@@ -232,8 +234,8 @@ class LSTMWrapper(torch.nn.Module):
     def forward(
         self,
         input: Tensor,
-        hx: Optional[Tuple[Tensor, Tensor]] = None,
-    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        hx: tuple[Tensor, Tensor] | None = None,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Forward pass using our custom op."""
 
         if self.batch_first:
@@ -297,8 +299,8 @@ class BidirectionalLSTMWrapper(torch.nn.Module):
     def forward(
         self,
         input: Tensor,
-        hx: Optional[Tuple[Tensor, Tensor]] = None,
-    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        hx: tuple[Tensor, Tensor] | None = None,
+    ) -> tuple[Tensor, tuple[Tensor, Tensor]]:
         """Forward pass using our custom bidirectional op."""
 
         if self.batch_first:
@@ -353,6 +355,150 @@ def patch_lstm_modules(model: torch.nn.Module) -> None:
                 print(f"Skipping {name}: {e}")
         else:
             patch_lstm_modules(module)
+
+
+def _to_cpu_lengths(lengths: Tensor) -> Tensor:
+    if lengths.device.type != "cpu":
+        return lengths.to("cpu")
+    return lengths
+
+
+@torch.library.custom_op(LSTM_PACKED_OP_NAME, mutates_args=())
+def lstm_forward_packed(
+    input: Tensor,
+    lengths: Tensor,
+    h0: Tensor,
+    c0: Tensor,
+    weight_ih_l0: Tensor,
+    weight_hh_l0: Tensor,
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Packed-semantics unidirectional LSTM.
+
+    This op is export-safe: it carries `lengths` explicitly, so TVM can later lower it
+    to a packed/variable-length backend (e.g. MPS ragged-row encoding) without relying
+    on PyTorch PackedSequence objects.
+
+    Input layout matches our other custom ops: (seq_len, batch, input_size).
+    The output is padded back to `seq_len` (total_length=seq_len).
+    """
+    seq_len, batch, _ = input.shape
+    hidden_size = weight_hh_l0.shape[1]
+
+    has_bias = bias_ih_l0 is not None and bias_hh_l0 is not None
+    lstm = torch.nn.LSTM(
+        input_size=input.shape[2],
+        hidden_size=hidden_size,
+        num_layers=1,
+        bias=has_bias,
+        batch_first=False,
+        bidirectional=False,
+    )
+    with torch.no_grad():
+        lstm.weight_ih_l0.copy_(weight_ih_l0)
+        lstm.weight_hh_l0.copy_(weight_hh_l0)
+        if has_bias:
+            lstm.bias_ih_l0.copy_(bias_ih_l0)
+            lstm.bias_hh_l0.copy_(bias_hh_l0)
+
+    packed = torch.nn.utils.rnn.pack_padded_sequence(
+        input, _to_cpu_lengths(lengths), batch_first=False, enforce_sorted=False
+    )
+    packed_out, (h_n, c_n) = lstm(packed, (h0, c0))
+    out, _ = torch.nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=False, total_length=seq_len)
+    return out, h_n, c_n
+
+
+@lstm_forward_packed.register_fake
+def _(
+    input: Tensor,
+    lengths: Tensor,
+    h0: Tensor,
+    c0: Tensor,
+    weight_ih_l0: Tensor,
+    weight_hh_l0: Tensor,
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    seq_len, batch, _ = input.shape
+    hidden_size = weight_hh_l0.shape[1]
+    return (
+        input.new_empty(seq_len, batch, hidden_size),
+        h0.new_empty(h0.shape),
+        c0.new_empty(c0.shape),
+    )
+
+
+@torch.library.custom_op(LSTM_PACKED_BIDIR_OP_NAME, mutates_args=())
+def lstm_forward_packed_bidirectional(
+    input: Tensor,
+    lengths: Tensor,
+    h0: Tensor,
+    c0: Tensor,
+    weight_ih_l0: Tensor,
+    weight_hh_l0: Tensor,
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+    weight_ih_l0_reverse: Tensor,
+    weight_hh_l0_reverse: Tensor,
+    bias_ih_l0_reverse: Tensor | None,
+    bias_hh_l0_reverse: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Packed-semantics bidirectional LSTM (single layer)."""
+    seq_len, batch, _ = input.shape
+    hidden_size = weight_hh_l0.shape[1]
+
+    has_bias = bias_ih_l0 is not None and bias_hh_l0 is not None
+    lstm = torch.nn.LSTM(
+        input_size=input.shape[2],
+        hidden_size=hidden_size,
+        num_layers=1,
+        bias=has_bias,
+        batch_first=False,
+        bidirectional=True,
+    )
+    with torch.no_grad():
+        lstm.weight_ih_l0.copy_(weight_ih_l0)
+        lstm.weight_hh_l0.copy_(weight_hh_l0)
+        lstm.weight_ih_l0_reverse.copy_(weight_ih_l0_reverse)
+        lstm.weight_hh_l0_reverse.copy_(weight_hh_l0_reverse)
+        if has_bias:
+            lstm.bias_ih_l0.copy_(bias_ih_l0)
+            lstm.bias_hh_l0.copy_(bias_hh_l0)
+            lstm.bias_ih_l0_reverse.copy_(bias_ih_l0_reverse)
+            lstm.bias_hh_l0_reverse.copy_(bias_hh_l0_reverse)
+
+    packed = torch.nn.utils.rnn.pack_padded_sequence(
+        input, _to_cpu_lengths(lengths), batch_first=False, enforce_sorted=False
+    )
+    packed_out, (h_n, c_n) = lstm(packed, (h0, c0))
+    out, _ = torch.nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=False, total_length=seq_len)
+    return out, h_n, c_n
+
+
+@lstm_forward_packed_bidirectional.register_fake
+def _(
+    input: Tensor,
+    lengths: Tensor,
+    h0: Tensor,
+    c0: Tensor,
+    weight_ih_l0: Tensor,
+    weight_hh_l0: Tensor,
+    bias_ih_l0: Tensor | None,
+    bias_hh_l0: Tensor | None,
+    weight_ih_l0_reverse: Tensor,
+    weight_hh_l0_reverse: Tensor,
+    bias_ih_l0_reverse: Tensor | None,
+    bias_hh_l0_reverse: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    seq_len, batch, _ = input.shape
+    hidden_size = weight_hh_l0.shape[1]
+    return (
+        input.new_empty(seq_len, batch, 2 * hidden_size),
+        h0.new_empty(h0.shape),
+        c0.new_empty(c0.shape),
+    )
 
 
 def test_lstm_custom_op():
@@ -538,4 +684,3 @@ def test_lstm_custom_op():
 
 if __name__ == "__main__":
     test_lstm_custom_op()
-

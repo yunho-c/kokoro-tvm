@@ -4,7 +4,7 @@
 
 During the porting of `DurationEncoder`, two significant issues were encountered that required workarounds. This document analyzes the root causes of these failures.
 
-### 1. `torch.export` & `PackedSequence` Limitations
+### `torch.export` and PackedSequence limitations
 
 **Symptom:**
 `TypeError: zeros(): argument 'size' failed to unpack the object at pos 2 with error "type must be tuple of ints,but got FakeTensor"`
@@ -17,9 +17,14 @@ During the porting of `DurationEncoder`, two significant issues were encountered
 
 **Solution/Workaround:**
 *   **Monkeypatching:** We replaced `pack_padded_sequence` and `pad_packed_sequence` with mock functions that essentially pass through the padded tensor (ignoring packing).
-*   **Implication:** The verified model in TVM assumes padded input processing (which is standard for many inference compilers) rather than optimized packed processing. This simplifies the graph and works correctly for static batch inference.
+*   **Implication:** This enables a static export, but it changes semantics. Reference Kokoro relies on length-aware LSTMs so that padded timesteps do not affect recurrent state updates, which is especially important for bidirectional LSTMs (the reverse direction will otherwise "see" padding first and the state can bleed into earlier timesteps). With packing disabled, the model behaves like a padded full-length LSTM; masking outputs after the fact does not recover the original recurrent dynamics.
 
-### 2. TVM Relax Frontend `expand` Bug
+If end-to-end audio sounds noise-like even when the standalone LSTM kernel is accurate, this semantic mismatch is the leading suspect. Use `py -3.12 python/src/kokoro_tvm/cli/validate_steps.py` to compare:
+*   Reference PyTorch (dynamic, with packing)
+*   PyTorch static (packing disabled)
+*   TVM outputs per major step
+
+### TVM Relax frontend `expand` bug
 
 **Symptom:**
 `IndexError: ShapeExpr index out of range` in `_expand` (`tvm/relax/frontend/torch/base_fx_graph_translator.py`).
@@ -54,5 +59,6 @@ The logic naively assumes a 1:1 mapping from target dimensions to input dimensio
 *   **Fix Verification:** The workaround in `tvm_extensions` successfully resolves the `IndexError` and produces the correct graph.
 
 ## Recommendations
-1.  **Submit Upstream Fix:** The `_expand` bug in TVM should be reported or fixed upstream.
-2.  **Avoid Packing in Inference:** For TVM/compilation targets, avoiding `PackedSequence` is generally preferred to enable static graph optimizations. The monkeypatch approach is a valid strategy for export.
+
+- **Submit upstream fix:** The `_expand` bug in TVM should be reported or fixed upstream.
+- **Preserve length semantics:** For Kokoro correctness, removing packing is not equivalent to reference behavior. A correctness-first direction is to reintroduce length-aware recurrence for the affected LSTMs (duration/text_encoder/f0n), for example by adding per-sample sequence lengths to the compiled LSTM path and freezing hidden/cell updates after the valid region (including the reverse direction of bidirectional LSTMs). See `NOTES/LSTM_SEMANTICS_MISMATCH.md` and `NOTES/RELAX_LSTM_FIX_PROPOSAL.md`.

@@ -14,6 +14,7 @@ It reports per-stage numerical error and basic waveform similarity metrics.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -89,12 +90,17 @@ def _trace_dynamic(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: fl
         d_en = kmodel.bert_encoder(bert_dur).transpose(-1, -2)
         s = ref_s[:, 128:]
         d = kmodel.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-        x, _ = kmodel.predictor.lstm(d)
+        lengths = input_lengths if input_lengths.device == torch.device("cpu") else input_lengths.to("cpu")
+        x_packed = torch.nn.utils.rnn.pack_padded_sequence(d, lengths, batch_first=True, enforce_sorted=False)
+        kmodel.predictor.lstm.flatten_parameters()
+        x_packed, _ = kmodel.predictor.lstm(x_packed)
+        x, _ = torch.nn.utils.rnn.pad_packed_sequence(x_packed, batch_first=True, total_length=cur_len)
         duration_logits = kmodel.predictor.duration_proj(x)
         duration = torch.sigmoid(duration_logits).sum(axis=-1) / speed
         pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
         if pred_dur.dim() == 0:
             pred_dur = pred_dur.unsqueeze(0)
+        pred_dur = pred_dur[:cur_len]
         indices = torch.repeat_interleave(torch.arange(cur_len), pred_dur)
         pred_aln_trg = torch.zeros((cur_len, indices.shape[0]))
         pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
@@ -139,7 +145,11 @@ def _trace_static(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: flo
         d_en = kmodel.bert_encoder(bert_dur).transpose(-1, -2)
         s = ref_s[:, 128:]
         d = kmodel.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-        x, _ = kmodel.predictor.lstm(d)
+        lengths = input_lengths if input_lengths.device == torch.device("cpu") else input_lengths.to("cpu")
+        x_packed = torch.nn.utils.rnn.pack_padded_sequence(d, lengths, batch_first=True, enforce_sorted=False)
+        kmodel.predictor.lstm.flatten_parameters()
+        x_packed, _ = kmodel.predictor.lstm(x_packed)
+        x, _ = torch.nn.utils.rnn.pad_packed_sequence(x_packed, batch_first=True, total_length=STATIC_TEXT_LEN)
         duration_logits = kmodel.predictor.duration_proj(x)
         duration = torch.sigmoid(duration_logits).sum(axis=-1) / speed
         pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
@@ -182,6 +192,31 @@ def _trace_static(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: flo
     }
 
 
+@contextlib.contextmanager
+def _mock_packed_sequence():
+    """Temporarily disable PackedSequence behavior for LSTMs.
+
+    This mimics the export-time behavior used in kokoro-tvm where packing is
+    replaced with a passthrough to avoid dynamic/data-dependent shapes.
+    """
+    orig_pack = torch.nn.utils.rnn.pack_padded_sequence
+    orig_pad = torch.nn.utils.rnn.pad_packed_sequence
+
+    def mock_pack(x, lengths, batch_first=False, enforce_sorted=True):
+        return x
+
+    def mock_pad(x, batch_first=False, padding_value=0.0, total_length=None):
+        return x, None
+
+    torch.nn.utils.rnn.pack_padded_sequence = mock_pack
+    torch.nn.utils.rnn.pad_packed_sequence = mock_pad
+    try:
+        yield
+    finally:
+        torch.nn.utils.rnn.pack_padded_sequence = orig_pack
+        torch.nn.utils.rnn.pad_packed_sequence = orig_pad
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate intermediate Kokoro stages (PyTorch vs TVM)")
     parser.add_argument("--text", type=str, default="Hello world", help="Input text")
@@ -213,6 +248,8 @@ def main() -> int:
 
     trace_dyn = _trace_dynamic(kmodel, phonemes, ref_s, args.speed)
     trace_static = _trace_static(kmodel, phonemes, ref_s, args.speed)
+    with _mock_packed_sequence():
+        trace_static_nopack = _trace_static(kmodel, phonemes, ref_s, args.speed)
 
     vocab = kmodel.vocab
     input_ids_tvm = text_to_ids(phonemes, vocab)
@@ -266,6 +303,38 @@ def main() -> int:
     corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
     print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
 
+    print("\nStatic PyTorch packed vs no-pack (packing semantics impact):")
+    show(
+        "duration.logits[:cur_len]",
+        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+        np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
+    )
+    show(
+        "text_encoder.t_en[:cur_len]",
+        np.asarray(trace_static["t_en"])[:, :, :cur_len],
+        np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
+    )
+    corr_np, lag_np = _best_lag_corr(
+        np.asarray(trace_static["audio_trimmed"]).reshape(-1),
+        np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1),
+        max_lag=2400,
+    )
+    print(f"audio_trimmed corr={corr_np:.4f} lag={lag_np} samples")
+
+    print("\nStatic PyTorch no-pack vs TVM (does TVM match no-pack semantics?):")
+    show(
+        "duration.logits[:cur_len]",
+        np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
+        np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
+    )
+    show(
+        "text_encoder.t_en[:cur_len]",
+        np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
+        np.asarray(trace_tvm["t_en"])[:, :, :cur_len],
+    )
+    corr_np2, lag_np2 = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm, 2400)
+    print(f"decoder.audio_trimmed corr={corr_np2:.4f} lag={lag_np2} samples")
+
     print("\nDynamic PyTorch vs Static PyTorch (shape/static padding impact):")
     show(
         "bert.d_en[:cur_len]",
@@ -287,9 +356,11 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         sf.write(out_dir / "trace_dynamic.wav", np.asarray(trace_dyn["audio_trimmed"]), 24000)
         sf.write(out_dir / "trace_static.wav", audio_static, 24000)
+        sf.write(out_dir / "trace_static_nopack.wav", np.asarray(trace_static_nopack["audio_trimmed"]), 24000)
         sf.write(out_dir / "trace_tvm.wav", audio_tvm, 24000)
         print(f"Wrote {out_dir / 'trace_dynamic.wav'}")
         print(f"Wrote {out_dir / 'trace_static.wav'}")
+        print(f"Wrote {out_dir / 'trace_static_nopack.wav'}")
         print(f"Wrote {out_dir / 'trace_tvm.wav'}")
 
     return 0
@@ -297,4 +368,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

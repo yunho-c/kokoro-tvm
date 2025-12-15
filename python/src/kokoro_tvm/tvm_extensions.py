@@ -41,6 +41,10 @@ def new_create_convert_map(self):
         "lstm_forward.default": self._lstm,  # Unidirectional (without namespace)
         "kokoro.lstm_forward_bidirectional.default": self._lstm,  # Bidirectional (with namespace)
         "lstm_forward_bidirectional.default": self._lstm,  # Bidirectional (without namespace)
+        "kokoro.lstm_forward_packed.default": self._lstm,  # Unidirectional (packed semantics)
+        "lstm_forward_packed.default": self._lstm,
+        "kokoro.lstm_forward_packed_bidirectional.default": self._lstm,  # Bidirectional (packed semantics)
+        "lstm_forward_packed_bidirectional.default": self._lstm,
         "lstm.input": self._lstm,  # Standard PyTorch LSTM (overrides upstream)
         "kokoro.lstm.default": self._lstm,  # Legacy custom op
         "lstm.default": self._lstm,  # Alias
@@ -595,13 +599,44 @@ def _lstm_topi(self, node):
     import tvm.topi.nn
 
     args = self.retrieve_args(node)
-    input_tensor = args[0]
-    hx = args[1] if len(args) > 1 else None
-    params = args[2] if len(args) > 2 else None
-    has_biases = args[3] if len(args) > 3 else True
-    num_layers = args[4] if len(args) > 4 else 1
-    bidirectional = args[7] if len(args) > 7 else False
-    batch_first = args[8] if len(args) > 8 else False
+    func_name = str(node.target) if hasattr(node, "target") else ""
+
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 8, 11, 12))
+    is_packed_custom_op = "packed" in func_name or len(args) in (8, 12)
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) in (11, 12)
+
+    if is_custom_op:
+        base = 2 if is_packed_custom_op else 1
+        input_tensor = args[0]
+        h0 = args[base + 0]
+        c0 = args[base + 1]
+        Wi = args[base + 2]
+        Wh = args[base + 3]
+        Bi = args[base + 4]
+        Bh = args[base + 5]
+        if is_bidirectional_custom_op:
+            Wi_r = args[base + 6]
+            Wh_r = args[base + 7]
+            Bi_r = args[base + 8]
+            Bh_r = args[base + 9]
+            params = [Wi, Wh, Bi, Bh, Wi_r, Wh_r, Bi_r, Bh_r]
+            bidirectional = True
+        else:
+            params = [Wi, Wh, Bi, Bh]
+            bidirectional = False
+
+        hx = (h0, c0)
+        has_biases = True
+        num_layers = 1
+        batch_first = False
+    else:
+        input_tensor = args[0]
+        hx = args[1] if len(args) > 1 else None
+        params = args[2] if len(args) > 2 else None
+        has_biases = args[3] if len(args) > 3 else True
+        num_layers = args[4] if len(args) > 4 else 1
+        bidirectional = args[7] if len(args) > 7 else False
+        batch_first = args[8] if len(args) > 8 else False
 
     # Transpose input if batch_first
     if batch_first:
@@ -659,10 +694,7 @@ def _lstm_topi(self, node):
                 None,
                 None,
                 None,  # proj, p_i, p_f, p_o
-                tvm.tir.sigmoid,
-                tvm.tir.tanh,
-                tvm.tir.tanh,
-                reverse,  # reverse argument
+                reverse=reverse,
             )
             debug_print(f"DEBUG: _lstm lstm_out type: {type(lstm_out)}")
 
@@ -722,13 +754,44 @@ def _lstm_relax(self, node):
     from kokoro_tvm.ops.lstm import emit_relax_lstm_unrolled
 
     args = self.retrieve_args(node)
-    input_tensor = args[0]
-    hx = args[1] if len(args) > 1 else None
-    params = args[2] if len(args) > 2 else None
-    has_biases = args[3] if len(args) > 3 else True
-    num_layers = args[4] if len(args) > 4 else 1
-    bidirectional = args[7] if len(args) > 7 else False
-    batch_first = args[8] if len(args) > 8 else False
+    func_name = str(node.target) if hasattr(node, "target") else ""
+
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 8, 11, 12))
+    is_packed_custom_op = "packed" in func_name or len(args) in (8, 12)
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) in (11, 12)
+
+    if is_custom_op:
+        base = 2 if is_packed_custom_op else 1
+        input_tensor = args[0]
+        h0 = args[base + 0]
+        c0 = args[base + 1]
+        Wi = args[base + 2]
+        Wh = args[base + 3]
+        Bi = args[base + 4]
+        Bh = args[base + 5]
+        if is_bidirectional_custom_op:
+            Wi_r = args[base + 6]
+            Wh_r = args[base + 7]
+            Bi_r = args[base + 8]
+            Bh_r = args[base + 9]
+            params = [Wi, Wh, Bi, Bh, Wi_r, Wh_r, Bi_r, Bh_r]
+            bidirectional = True
+        else:
+            params = [Wi, Wh, Bi, Bh]
+            bidirectional = False
+
+        hx = (h0, c0)
+        has_biases = True
+        num_layers = 1
+        batch_first = False
+    else:
+        input_tensor = args[0]
+        hx = args[1] if len(args) > 1 else None
+        params = args[2] if len(args) > 2 else None
+        has_biases = args[3] if len(args) > 3 else True
+        num_layers = args[4] if len(args) > 4 else 1
+        bidirectional = args[7] if len(args) > 7 else False
+        batch_first = args[8] if len(args) > 8 else False
 
     # Get dimensions
     input_shape = self.shape_of(input_tensor)
@@ -854,24 +917,28 @@ def _lstm_tir(self, node):
     func_name = str(node.target) if hasattr(node, "target") else ""
 
     # Detect format: custom op has weights as direct args, PyTorch LSTM has params list
-    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 11))
-    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) == 11
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 8, 11, 12))
+    is_packed_custom_op = "packed" in func_name or len(args) in (8, 12)
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) in (11, 12)
 
     if is_custom_op:
-        # Custom op format: (input, h0, c0, Wi, Wh, Bi, Bh [, Wi_r, Wh_r, Bi_r, Bh_r])
+        # Custom op format:
+        # - padded: (input, h0, c0, Wi, Wh, Bi, Bh [, Wi_r, Wh_r, Bi_r, Bh_r])
+        # - packed: (input, lengths, h0, c0, Wi, Wh, Bi, Bh [, Wi_r, Wh_r, Bi_r, Bh_r])
         input_tensor = args[0]
-        h0 = args[1]
-        c0 = args[2]
-        Wi = args[3]
-        Wh = args[4]
-        Bi = args[5]
-        Bh = args[6]
+        base = 2 if is_packed_custom_op else 1
+        h0 = args[base + 0]
+        c0 = args[base + 1]
+        Wi = args[base + 2]
+        Wh = args[base + 3]
+        Bi = args[base + 4]
+        Bh = args[base + 5]
 
         if is_bidirectional_custom_op:
-            Wi_r = args[7]
-            Wh_r = args[8]
-            Bi_r = args[9]
-            Bh_r = args[10]
+            Wi_r = args[base + 6]
+            Wh_r = args[base + 7]
+            Bi_r = args[base + 8]
+            Bh_r = args[base + 9]
 
         batch_first = False  # Custom op always uses seq_len first format internally
 
@@ -1059,26 +1126,29 @@ def _lstm_mps(self, node):
     args = self.retrieve_args(node)
     func_name = str(node.target) if hasattr(node, "target") else ""
 
-    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 11))
-    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) == 11
+    is_custom_op = "lstm_forward" in func_name and ("kokoro" in func_name or len(args) in (7, 8, 11, 12))
+    is_packed_custom_op = "packed" in func_name or len(args) in (8, 12)
+    is_bidirectional_custom_op = "bidirectional" in func_name or len(args) in (11, 12)
 
     if is_custom_op:
         input_tensor = args[0]
-        h0 = args[1]
-        c0 = args[2]
-        Wi = args[3]
-        Wh = args[4]
-        Bi = args[5]
-        Bh = args[6]
+        base = 2 if is_packed_custom_op else 1
+        lengths = args[1] if is_packed_custom_op else None
+        h0 = args[base + 0]
+        c0 = args[base + 1]
+        Wi = args[base + 2]
+        Wh = args[base + 3]
+        Bi = args[base + 4]
+        Bh = args[base + 5]
         batch_first = False
         num_layers = 1
         bidirectional = is_bidirectional_custom_op
 
         if bidirectional:
-            Wi_r = args[7]
-            Wh_r = args[8]
-            Bi_r = args[9]
-            Bh_r = args[10]
+            Wi_r = args[base + 6]
+            Wh_r = args[base + 7]
+            Bi_r = args[base + 8]
+            Bh_r = args[base + 9]
     else:
         input_tensor = args[0]
         hx = args[1] if len(args) > 1 else None
@@ -1138,29 +1208,56 @@ def _lstm_mps(self, node):
     if c0 is None:
         c0 = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((1, batch_size, hidden_size)), dtype))
 
-    def emit_unidirectional(x, wih, whh, bih, bhh, h0_, c0_):
-        out = self.block_builder.emit_te(
-            lambda x_, wih_, whh_, bih_, bhh_, h0__, c0__: tvm_mps.lstm(
-                x_,
-                wih_,
-                whh_,
-                bih_,
-                bhh_,
-                h0__,
-                c0__,
-                hidden_size,
-                num_layers=1,
-                batch_first=batch_first,
-                bidirectional=False,
-            ),
-            x,
-            wih,
-            whh,
-            bih,
-            bhh,
-            h0_,
-            c0_,
-        )
+    def emit_unidirectional(x, wih, whh, bih, bhh, h0_, c0_, reverse: bool = False):
+        if is_packed_custom_op:
+            out = self.block_builder.emit_te(
+                lambda x_, l_, wih_, whh_, bih_, bhh_, h0__, c0__: tvm_mps.lstm_packed(
+                    x_,
+                    l_,
+                    wih_,
+                    whh_,
+                    bih_,
+                    bhh_,
+                    h0__,
+                    c0__,
+                    hidden_size,
+                    num_layers=1,
+                    batch_first=batch_first,
+                    bidirectional=False,
+                    reverse=reverse,
+                ),
+                x,
+                lengths,
+                wih,
+                whh,
+                bih,
+                bhh,
+                h0_,
+                c0_,
+            )
+        else:
+            out = self.block_builder.emit_te(
+                lambda x_, wih_, whh_, bih_, bhh_, h0__, c0__: tvm_mps.lstm(
+                    x_,
+                    wih_,
+                    whh_,
+                    bih_,
+                    bhh_,
+                    h0__,
+                    c0__,
+                    hidden_size,
+                    num_layers=1,
+                    batch_first=batch_first,
+                    bidirectional=False,
+                ),
+                x,
+                wih,
+                whh,
+                bih,
+                bhh,
+                h0_,
+                c0_,
+            )
 
         if isinstance(out, (list, tuple)) or "Array" in str(type(out)):
             return out[0], out[1], out[2]
@@ -1195,9 +1292,12 @@ def _lstm_mps(self, node):
             c0_r = self.block_builder.emit(relax.op.zeros(relax.ShapeExpr((batch_size, hidden_size)), dtype))
 
         out_f, h_f, c_f = emit_unidirectional(input_tensor, Wi, Wh, Bi, Bh, h0_f, c0_f)
-        input_rev = self.block_builder.emit(relax.op.flip(input_tensor, axis=time_axis))
-        out_r_rev, h_r, c_r = emit_unidirectional(input_rev, Wi_r, Wh_r, Bi_r, Bh_r, h0_r, c0_r)
-        out_r = self.block_builder.emit(relax.op.flip(out_r_rev, axis=time_axis))
+        if is_packed_custom_op:
+            out_r, h_r, c_r = emit_unidirectional(input_tensor, Wi_r, Wh_r, Bi_r, Bh_r, h0_r, c0_r, reverse=True)
+        else:
+            input_rev = self.block_builder.emit(relax.op.flip(input_tensor, axis=time_axis))
+            out_r_rev, h_r, c_r = emit_unidirectional(input_rev, Wi_r, Wh_r, Bi_r, Bh_r, h0_r, c0_r)
+            out_r = self.block_builder.emit(relax.op.flip(out_r_rev, axis=time_axis))
 
         out_seq = self.block_builder.emit(relax.op.concat([out_f, out_r], axis=2))
         h_final = self.block_builder.emit(relax.op.concat([h_f, h_r], axis=0))

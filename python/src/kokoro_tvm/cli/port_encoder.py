@@ -43,6 +43,13 @@ def main():
         choices=["mps", "tir", "relax", "topi"],
         help="LSTM implementation: mps (Metal/MPS extern), tir (non-unrolled, O(1) IR), relax (unrolled), topi (original)",
     )
+    parser.add_argument(
+        "--lstm-semantics",
+        type=str,
+        default="padded",
+        choices=["padded", "packed"],
+        help="LSTM variable-length semantics: padded (current, ignores packing) or packed (preserves lengths via a custom op)",
+    )
 
     args = parser.parse_args()
 
@@ -101,6 +108,7 @@ def compile_component(name, args, target, ext):
             seq_len=args.seq_len,
             load_weights=not args.no_weights,
             dump_ir=f"{args.output_dir}/duration_ir.py",
+            lstm_semantics=args.lstm_semantics,
         )
 
     elif name == "f0n":
@@ -108,6 +116,7 @@ def compile_component(name, args, target, ext):
             aligned_len=args.aligned_len,
             load_weights=not args.no_weights,
             dump_ir=f"{args.output_dir}/f0n_ir.py",
+            lstm_semantics=args.lstm_semantics,
         )
 
     elif name == "text_encoder":
@@ -115,6 +124,7 @@ def compile_component(name, args, target, ext):
             seq_len=args.seq_len,
             load_weights=not args.no_weights,
             dump_ir=f"{args.output_dir}/text_encoder_ir.py",
+            lstm_semantics=args.lstm_semantics,
         )
 
     if mod is None:
