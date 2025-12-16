@@ -317,22 +317,39 @@ def _fmt_corr_lag(corr: float, lag: int) -> str:
 
 
 def _build_full_aln_from_pred_dur(pred_dur: np.ndarray, *, cur_len: int) -> tuple[torch.Tensor, int]:
+    return _build_aln_from_pred_dur(pred_dur, token_len=STATIC_TEXT_LEN, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
+
+
+def _build_aln_from_pred_dur(
+    pred_dur: np.ndarray,
+    *,
+    token_len: int,
+    cur_len: int,
+    total_frames: int | None,
+) -> tuple[torch.Tensor, int]:
     pred = torch.as_tensor(pred_dur, dtype=torch.long).reshape(-1)
-    if pred.numel() == 0:
-        return torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32), 0
+    if pred.numel() == 0 or cur_len <= 0 or token_len <= 0:
+        frames = 0 if total_frames is None else 0
+        width = frames if total_frames is None else int(total_frames)
+        return torch.zeros((1, int(token_len), width), dtype=torch.float32), 0
+
+    cur_len = int(max(0, min(int(cur_len), int(pred.numel()), int(token_len))))
     pred = pred[:cur_len]
     indices = torch.repeat_interleave(torch.arange(cur_len), pred)
     frames = int(indices.numel())
-    if frames > STATIC_AUDIO_LEN:
-        indices = indices[:STATIC_AUDIO_LEN]
-        frames = STATIC_AUDIO_LEN
 
-    pred_aln = torch.zeros((cur_len, STATIC_AUDIO_LEN), dtype=torch.float32)
+    if total_frames is not None:
+        total_frames = int(total_frames)
+        frames = min(frames, total_frames)
+        indices = indices[:frames]
+        width = total_frames
+    else:
+        width = frames
+
+    aln = torch.zeros((1, int(token_len), int(width)), dtype=torch.float32)
     if frames:
-        pred_aln[indices, torch.arange(frames)] = 1.0
-    full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
-    full_aln[0, :cur_len, :] = pred_aln
-    return full_aln, frames
+        aln[0, indices, torch.arange(frames)] = 1.0
+    return aln, frames
 
 
 def _decode_pytorch(
@@ -377,11 +394,51 @@ def _decode_tvm(
     return audio[:target]
 
 
+def _pad_3d_time(x: np.ndarray, *, target_t: int) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected 3D tensor, got shape={arr.shape}")
+    t = int(arr.shape[2])
+    target_t = int(target_t)
+    if t == target_t:
+        return arr
+    if t > target_t:
+        return arr[:, :, :target_t]
+    out = np.zeros((arr.shape[0], arr.shape[1], target_t), dtype=np.float32)
+    out[:, :, :t] = arr
+    return out
+
+
+def _pad_2d_time(x: np.ndarray, *, target_t: int) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D tensor, got shape={arr.shape}")
+    t = int(arr.shape[1])
+    target_t = int(target_t)
+    if t == target_t:
+        return arr
+    if t > target_t:
+        return arr[:, :target_t]
+    out = np.zeros((arr.shape[0], target_t), dtype=np.float32)
+    out[:, :t] = arr
+    return out
+
+
 def _compute_asr_from_trace(trace: dict[str, object], *, cur_len: int) -> tuple[np.ndarray, int]:
+    return _compute_asr_from_trace_with_target(trace, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
+
+
+def _compute_asr_from_trace_with_target(
+    trace: dict[str, object],
+    *,
+    cur_len: int,
+    total_frames: int | None,
+) -> tuple[np.ndarray, int]:
     pred_dur = np.asarray(trace["pred_dur"]).reshape(-1)
     t_en = torch.as_tensor(np.asarray(trace["t_en"]), dtype=torch.float32)
-    full_aln, frames = _build_full_aln_from_pred_dur(pred_dur, cur_len=cur_len)
-    asr = (t_en @ full_aln).numpy().astype(np.float32, copy=False)
+    token_len = int(t_en.shape[-1])
+    aln, frames = _build_aln_from_pred_dur(pred_dur, token_len=token_len, cur_len=cur_len, total_frames=total_frames)
+    asr = (t_en @ aln).numpy().astype(np.float32, copy=False)
     return asr, frames
 
 
@@ -718,6 +775,7 @@ def main() -> int:
     tvm_pred_dur = np.asarray(trace_tvm["pred_dur"]).reshape(-1)
     static_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
     static_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
+    dyn_pred_dur = np.asarray(trace_dyn["pred_dur"]).reshape(-1)
 
     _print_metrics_table(
         "pred_dur",
@@ -733,16 +791,22 @@ def main() -> int:
         ],
     )
 
-    asr_tvm, frames_tvm_recon = _compute_asr_from_trace(trace_tvm, cur_len=cur_len)
-    asr_static, frames_static_recon = _compute_asr_from_trace(trace_static, cur_len=cur_len)
-    asr_static_np, frames_static_np_recon = _compute_asr_from_trace(trace_static_nopack, cur_len=cur_len)
+    asr_tvm, frames_tvm_recon = _compute_asr_from_trace_with_target(trace_tvm, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
+    asr_static, frames_static_recon = _compute_asr_from_trace_with_target(trace_static, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
+    asr_static_np, frames_static_np_recon = _compute_asr_from_trace_with_target(
+        trace_static_nopack, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN
+    )
+    asr_dyn, frames_dyn_recon = _compute_asr_from_trace_with_target(trace_dyn, cur_len=cur_len, total_frames=None)
 
     frames_static = int(trace_static["frames"])
     frames_tvm = int(trace_tvm["frames"])
+    frames_dyn = int(trace_dyn["frames"])
     if frames_static != frames_static_recon:
         print(f"Warning: pt.static frames mismatch (trace={frames_static}, recon={frames_static_recon})")
     if frames_tvm != frames_tvm_recon:
         print(f"Warning: tvm frames mismatch (trace={frames_tvm}, recon={frames_tvm_recon})")
+    if frames_dyn != frames_dyn_recon:
+        print(f"Warning: pt.dynamic frames mismatch (trace={frames_dyn}, recon={frames_dyn_recon})")
 
     prefix_frames = min(frames_static_recon, frames_tvm_recon)
     _print_metrics_table(
@@ -761,6 +825,32 @@ def main() -> int:
     if args.verbose:
         _array_percentiles("asr(pt.static)[:prefix_frames]", asr_static[:, :, :prefix_frames])
         _array_percentiles("asr(tvm)[:prefix_frames]", asr_tvm[:, :, :prefix_frames])
+
+    _rule("PyTorch dynamic vs static conditioning (prefix)")
+    prefix_ds = min(frames_dyn_recon, frames_static_recon)
+    _print_metrics_table(
+        "dynamic vs static (conditioning)",
+        [
+            (
+                "pred_dur(pt.dynamic)[:cur_len]",
+                _metrics(dyn_pred_dur[:cur_len].astype(np.float32), static_pred_dur[:cur_len].astype(np.float32)),
+            ),
+            ("asr(pt.dynamic)[:prefix]", _metrics(asr_dyn[:, :, :prefix_ds], asr_static[:, :, :prefix_ds])),
+        ],
+    )
+    dyn_f0_full = np.asarray(trace_dyn["f0"]).astype(np.float32, copy=False)
+    dyn_n_full = np.asarray(trace_dyn["n"]).astype(np.float32, copy=False)
+    static_f0_full_2d = np.asarray(trace_static["f0"]).astype(np.float32, copy=False)
+    static_n_full_2d = np.asarray(trace_static["n"]).astype(np.float32, copy=False)
+    f0_prefix = min(dyn_f0_full.shape[1], static_f0_full_2d.shape[1], prefix_ds * 2)
+    n_prefix = min(dyn_n_full.shape[1], static_n_full_2d.shape[1], prefix_ds * 2)
+    _print_metrics_table(
+        "dynamic vs static (F0/N prefix)",
+        [
+            ("f0[:2*prefix_frames]", _metrics(dyn_f0_full[:, :f0_prefix], static_f0_full_2d[:, :f0_prefix])),
+            ("n[:2*prefix_frames]", _metrics(dyn_n_full[:, :n_prefix], static_n_full_2d[:, :n_prefix])),
+        ],
+    )
 
     _rule("Static PyTorch packed vs no-pack (packing semantics impact)")
     _print_metrics_table(
@@ -890,6 +980,26 @@ def main() -> int:
         corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
         print(f"tvm(dec<-pt.no-pack) corr(vs pt.no-pack)={corr_x3b:.4f} lag={lag_x3b} samples")
 
+        asr_dyn_pad = _pad_3d_time(asr_dyn, target_t=STATIC_AUDIO_LEN)
+        f0_dyn_pad = _pad_2d_time(dyn_f0_full, target_t=STATIC_AUDIO_LEN * 2)
+        n_dyn_pad = _pad_2d_time(dyn_n_full, target_t=STATIC_AUDIO_LEN * 2)
+        frames_dyn_clamped = min(int(frames_dyn_recon), STATIC_AUDIO_LEN)
+        audio_tvm_from_dyn = _decode_tvm(
+            pipeline,
+            asr=asr_dyn_pad,
+            f0=f0_dyn_pad,
+            n=n_dyn_pad,
+            s128=pt_s128,
+            frames=frames_dyn_clamped,
+        )
+        _array_stats("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn)
+        if args.verbose:
+            _array_percentiles("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn, max_samples=100_000)
+        corr_x4, lag_x4 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_dyn, max_lag=2400)
+        print(f"tvm(dec<-pt.dynamic) corr(vs pt.dynamic)={corr_x4:.4f} lag={lag_x4} samples")
+        corr_x4s, lag_x4s = _best_lag_corr(audio_static, audio_tvm_from_dyn, max_lag=2400)
+        print(f"tvm(dec<-pt.dynamic) corr(vs pt.static)={corr_x4s:.4f} lag={lag_x4s} samples")
+
     _rule("Dynamic PyTorch vs Static PyTorch (shape/static padding impact)")
     _print_metrics_table(
         "dynamic vs static",
@@ -964,6 +1074,15 @@ def main() -> int:
                 f"max_abs={_fmt_sci(audio_tvm_from_pt_stats['max_abs'])}",
             )
         )
+        audio_tvm_from_dyn_stats = _summary_stats_1d(audio_tvm_from_dyn)
+        summary_rows.append(
+            (
+                "tvm(dec<-pt.dynamic) corr(vs pt.dynamic)",
+                _fmt_corr_lag(corr_x4, lag_x4),
+                _fmt_float_flag(audio_tvm_from_dyn_stats["finite_frac"], ok_min=1.0, fmt="{:.3f}"),
+                f"max_abs={_fmt_sci(audio_tvm_from_dyn_stats['max_abs'])}",
+            )
+        )
     _print_summary_table("Run summary", summary_rows)
 
     if args.save_dir:
@@ -977,6 +1096,7 @@ def main() -> int:
             sf.write(out_dir / "trace_pt_dec_from_tvm.wav", audio_pt_from_tvm, 24000)
             sf.write(out_dir / "trace_tvm_dec_from_pt_static.wav", audio_tvm_from_pt, 24000)
             sf.write(out_dir / "trace_tvm_dec_from_pt_nopack.wav", audio_tvm_from_pt_np, 24000)
+            sf.write(out_dir / "trace_tvm_dec_from_pt_dynamic.wav", audio_tvm_from_dyn, 24000)
         print(f"Wrote {out_dir / 'trace_dynamic.wav'}")
         print(f"Wrote {out_dir / 'trace_static.wav'}")
         print(f"Wrote {out_dir / 'trace_static_nopack.wav'}")
@@ -985,6 +1105,7 @@ def main() -> int:
             print(f"Wrote {out_dir / 'trace_pt_dec_from_tvm.wav'}")
             print(f"Wrote {out_dir / 'trace_tvm_dec_from_pt_static.wav'}")
             print(f"Wrote {out_dir / 'trace_tvm_dec_from_pt_nopack.wav'}")
+            print(f"Wrote {out_dir / 'trace_tvm_dec_from_pt_dynamic.wav'}")
 
     return 0
 
