@@ -121,6 +121,38 @@ def _array_stats(name: str, x: np.ndarray, *, atol: float = 1e-8) -> None:
     )
 
 
+def _array_percentiles(
+    name: str,
+    x: np.ndarray,
+    *,
+    q: tuple[float, ...] = (0.0, 1.0, 5.0, 50.0, 95.0, 99.0, 100.0),
+    max_samples: int = 200_000,
+    seed: int = 0,
+) -> None:
+    arr = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    if arr.size == 0:
+        print(f"{name}: empty")
+        return
+    finite = np.isfinite(arr)
+    arr = arr[finite]
+    if arr.size == 0:
+        print(f"{name}: all non-finite")
+        return
+    if arr.size > max_samples:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(arr.size, size=max_samples, replace=False)
+        arr = arr[idx]
+
+    qs = np.array(q, dtype=np.float32) / 100.0
+    vals = np.quantile(arr, qs).astype(np.float32, copy=False)
+    abs_vals = np.quantile(np.abs(arr), qs).astype(np.float32, copy=False)
+
+    q_str = ",".join([f"p{int(v):02d}" if v.is_integer() else f"p{v:g}" for v in q])
+    vals_str = ", ".join([f"{v:.4g}" for v in vals.tolist()])
+    abs_str = ", ".join([f"{v:.4g}" for v in abs_vals.tolist()])
+    print(f"{name}: {q_str}=[{vals_str}] abs=[{abs_str}] (sample_n={arr.size})")
+
+
 def _build_full_aln_from_pred_dur(pred_dur: np.ndarray, *, cur_len: int) -> tuple[torch.Tensor, int]:
     pred = torch.as_tensor(pred_dur, dtype=torch.long).reshape(-1)
     if pred.numel() == 0:
@@ -180,6 +212,14 @@ def _decode_tvm(
     audio = out.numpy().squeeze().astype(np.float32, copy=False)
     target = max(0, min(int(audio.size), int(frames) * SAMPLES_PER_FRAME))
     return audio[:target]
+
+
+def _compute_asr_from_trace(trace: dict[str, object], *, cur_len: int) -> tuple[np.ndarray, int]:
+    pred_dur = np.asarray(trace["pred_dur"]).reshape(-1)
+    t_en = torch.as_tensor(np.asarray(trace["t_en"]), dtype=torch.float32)
+    full_aln, frames = _build_full_aln_from_pred_dur(pred_dur, cur_len=cur_len)
+    asr = (t_en @ full_aln).numpy().astype(np.float32, copy=False)
+    return asr, frames
 
 
 def _trace_dynamic(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: float) -> dict[str, object]:
@@ -337,6 +377,13 @@ def main() -> int:
         action="store_true",
         help="Run crossed decoder tests (TVM encoder -> PyTorch decoder, and PyTorch encoder -> TVM decoder)",
     )
+    parser.add_argument(
+        "--tvm-ref-s",
+        type=str,
+        default="inference",
+        choices=["inference", "hf"],
+        help="Select style source for TVM pipeline: inference voice pack (default) or HF voice pack (matches PyTorch)",
+    )
     args = parser.parse_args()
 
     kp = KPipeline(lang_code=args.lang, model=False)
@@ -354,7 +401,8 @@ def main() -> int:
         hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename=f"voices/{args.voice}.pt"),
         weights_only=True,
     )
-    ref_s = select_ref_s(voice_pack_ref, len(phonemes))
+    ref_s_hf = select_ref_s(voice_pack_ref, len(phonemes))
+    ref_s = ref_s_hf
 
     trace_dyn = _trace_dynamic(kmodel, phonemes, ref_s, args.speed)
     trace_static = _trace_static(kmodel, phonemes, ref_s, args.speed)
@@ -364,7 +412,10 @@ def main() -> int:
     vocab = kmodel.vocab
     input_ids_tvm = text_to_ids(phonemes, vocab)
     voice_pack_tvm = load_voice_pack(args.voice)
-    ref_s_tvm = select_ref_s(voice_pack_tvm, len(phonemes))
+    ref_s_inference = select_ref_s(voice_pack_tvm, len(phonemes))
+
+    ref_s_tvm = ref_s_inference if args.tvm_ref_s == "inference" else ref_s_hf
+
     pipeline = KokoroPipeline(args.lib_dir, args.device, hybrid=args.hybrid)
     trace_tvm = pipeline.trace(input_ids_tvm, ref_s_tvm, speed=args.speed)
 
@@ -375,6 +426,9 @@ def main() -> int:
     def show(name: str, a: np.ndarray, b: np.ndarray):
         m = _metrics(a, b)
         print(f"{name}: mae={m['mae']:.3e} max_abs={m['max_abs']:.3e} rmse={m['rmse']:.3e}")
+
+    show("ref_s(hf) vs ref_s(inference)", ref_s_hf.numpy(), ref_s_inference.numpy())
+    show("ref_s(hf) vs ref_s(tvm used)", ref_s_hf.numpy(), ref_s_tvm.numpy())
 
     print("\nStatic PyTorch vs TVM (module fidelity):")
     show(
@@ -435,6 +489,20 @@ def main() -> int:
         f"head={static_n_pad['head']} tail={static_n_pad['tail']}"
     )
 
+    print("\nF0/N distribution (valid + padded):")
+    dyn_f0 = np.asarray(trace_dyn["f0"]).reshape(-1)
+    dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
+    _array_percentiles("pt.dynamic f0", dyn_f0)
+    _array_percentiles("pt.dynamic n", dyn_n)
+    _array_percentiles("pt.static f0[:2*frames_static]", static_f0[:valid_f0n])
+    _array_percentiles("pt.static n[:2*frames_static]", static_n[:valid_f0n])
+    _array_percentiles("tvm f0[:2*frames_static]", tvm_f0[:valid_f0n])
+    _array_percentiles("tvm n[:2*frames_static]", tvm_n[:valid_f0n])
+    _array_percentiles("pt.static f0[pad]", static_f0[valid_f0n:])
+    _array_percentiles("pt.static n[pad]", static_n[valid_f0n:])
+    _array_percentiles("tvm f0[pad]", tvm_f0[valid_f0n:])
+    _array_percentiles("tvm n[pad]", tvm_n[valid_f0n:])
+
     audio_static = np.asarray(trace_static["audio_trimmed"]).reshape(-1)
     audio_tvm = np.asarray(trace_tvm["audio_trimmed"]).reshape(-1)
     print("\nDecoder audio stats:")
@@ -449,6 +517,43 @@ def main() -> int:
         print(f"  s:   {stats['style_128']}")
     corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
     print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
+
+    print("\nAlignment/ASR (decoder conditioning) fidelity:")
+    tvm_pred_dur = np.asarray(trace_tvm["pred_dur"]).reshape(-1)
+    static_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
+    static_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
+
+    show("pred_dur(pt.static)[:cur_len]", static_pred_dur[:cur_len].astype(np.float32), tvm_pred_dur[:cur_len].astype(np.float32))
+    show(
+        "pred_dur(pt.no-pack)[:cur_len]",
+        static_np_pred_dur[:cur_len].astype(np.float32),
+        tvm_pred_dur[:cur_len].astype(np.float32),
+    )
+
+    asr_tvm, frames_tvm_recon = _compute_asr_from_trace(trace_tvm, cur_len=cur_len)
+    asr_static, frames_static_recon = _compute_asr_from_trace(trace_static, cur_len=cur_len)
+    asr_static_np, frames_static_np_recon = _compute_asr_from_trace(trace_static_nopack, cur_len=cur_len)
+
+    frames_static = int(trace_static["frames"])
+    frames_tvm = int(trace_tvm["frames"])
+    if frames_static != frames_static_recon:
+        print(f"Warning: pt.static frames mismatch (trace={frames_static}, recon={frames_static_recon})")
+    if frames_tvm != frames_tvm_recon:
+        print(f"Warning: tvm frames mismatch (trace={frames_tvm}, recon={frames_tvm_recon})")
+
+    prefix_frames = min(frames_static_recon, frames_tvm_recon)
+    show(
+        "asr(pt.static)[:prefix_frames]",
+        asr_static[:, :, :prefix_frames],
+        asr_tvm[:, :, :prefix_frames],
+    )
+    show(
+        "asr(pt.no-pack)[:prefix_frames]",
+        asr_static_np[:, :, :prefix_frames],
+        asr_tvm[:, :, :prefix_frames],
+    )
+    _array_percentiles("asr(pt.static)[:prefix_frames]", asr_static[:, :, :prefix_frames])
+    _array_percentiles("asr(tvm)[:prefix_frames]", asr_tvm[:, :, :prefix_frames])
 
     print("\nStatic PyTorch packed vs no-pack (packing semantics impact):")
     show(
@@ -485,7 +590,6 @@ def main() -> int:
     if args.cross_decoder:
         print("\nCrossed decoder inputs (encoder->decoder matrix):")
 
-        tvm_pred_dur = np.asarray(trace_tvm["pred_dur"]).reshape(-1)
         tvm_full_aln, tvm_frames = _build_full_aln_from_pred_dur(tvm_pred_dur, cur_len=cur_len)
         tvm_t_en = torch.as_tensor(np.asarray(trace_tvm["t_en"]), dtype=torch.float32)
         asr_tvm = (tvm_t_en @ tvm_full_aln).numpy()
@@ -503,8 +607,11 @@ def main() -> int:
             frames=tvm_frames,
         )
         _array_stats("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm)
+        _array_percentiles("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm, max_samples=100_000)
         corr_x1, lag_x1 = _best_lag_corr(audio_static, audio_pt_from_tvm, max_lag=2400)
         print(f"pt(dec<-tvm) corr(vs pt.static)={corr_x1:.4f} lag={lag_x1} samples")
+        corr_x1d, lag_x1d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_pt_from_tvm, max_lag=2400)
+        print(f"pt(dec<-tvm) corr(vs pt.dynamic)={corr_x1d:.4f} lag={lag_x1d} samples")
         corr_x1b, lag_x1b = _best_lag_corr(audio_tvm, audio_pt_from_tvm, max_lag=2400)
         print(f"pt(dec<-tvm) corr(vs tvm)={corr_x1b:.4f} lag={lag_x1b} samples")
 
@@ -525,8 +632,11 @@ def main() -> int:
             frames=pt_frames,
         )
         _array_stats("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt)
+        _array_percentiles("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt, max_samples=100_000)
         corr_x2, lag_x2 = _best_lag_corr(audio_static, audio_tvm_from_pt, max_lag=2400)
         print(f"tvm(dec<-pt.static) corr(vs pt.static)={corr_x2:.4f} lag={lag_x2} samples")
+        corr_x2b2, lag_x2b2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt, max_lag=2400)
+        print(f"tvm(dec<-pt.static) corr(vs pt.dynamic)={corr_x2b2:.4f} lag={lag_x2b2} samples")
         corr_x2b, lag_x2b = _best_lag_corr(audio_tvm, audio_tvm_from_pt, max_lag=2400)
         print(f"tvm(dec<-pt.static) corr(vs tvm)={corr_x2b:.4f} lag={lag_x2b} samples")
 
@@ -546,8 +656,11 @@ def main() -> int:
             frames=pt_np_frames,
         )
         _array_stats("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np)
+        _array_percentiles("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np, max_samples=100_000)
         corr_x3, lag_x3 = _best_lag_corr(audio_static, audio_tvm_from_pt_np, max_lag=2400)
         print(f"tvm(dec<-pt.no-pack) corr(vs pt.static)={corr_x3:.4f} lag={lag_x3} samples")
+        corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
+        print(f"tvm(dec<-pt.no-pack) corr(vs pt.no-pack)={corr_x3b:.4f} lag={lag_x3b} samples")
 
     print("\nDynamic PyTorch vs Static PyTorch (shape/static padding impact):")
     show(
