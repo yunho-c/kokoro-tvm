@@ -28,6 +28,8 @@ from kokoro.pipeline import KPipeline
 from kokoro_tvm.cli.inference import load_voice_pack, select_ref_s, text_to_ids
 from kokoro_tvm.pipeline import KokoroPipeline, SAMPLES_PER_FRAME, STATIC_AUDIO_LEN, STATIC_TEXT_LEN
 
+_plain_print = print
+
 try:
     from rich.console import Console
     from rich.pretty import Pretty
@@ -40,12 +42,20 @@ except ImportError:
     console = None
 
 
-if _RICH_AVAILABLE:
-    print = console.print  # type: ignore[assignment]
+_USE_RICH = _RICH_AVAILABLE
+
+
+def _set_use_rich(use_rich: bool) -> None:
+    global _USE_RICH, print  # noqa: A001 - intentional rebind for pretty output
+    _USE_RICH = bool(use_rich and _RICH_AVAILABLE)
+    if _USE_RICH:
+        print = console.print  # type: ignore[assignment]
+    else:
+        print = _plain_print  # type: ignore[assignment]
 
 
 def _rule(title: str) -> None:
-    if _RICH_AVAILABLE:
+    if _USE_RICH:
         console.rule(title)
     else:
         print(f"\n{title}\n" + "-" * len(title))
@@ -60,7 +70,7 @@ def _fmt_sci(x: float) -> str:
 def _print_metrics_table(title: str, rows: list[tuple[str, dict[str, float]]]) -> None:
     if not rows:
         return
-    if _RICH_AVAILABLE:
+    if _USE_RICH:
         table = Table(title=title, show_lines=False)
         table.add_column("name", overflow="fold")
         table.add_column("mae", justify="right")
@@ -198,6 +208,112 @@ def _array_percentiles(
     vals_str = ", ".join([f"{v:.4g}" for v in vals.tolist()])
     abs_str = ", ".join([f"{v:.4g}" for v in abs_vals.tolist()])
     print(f"{name}: {q_str}=[{vals_str}] abs=[{abs_str}] (sample_n={arr.size})")
+
+
+def _summary_stats_1d(x: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    if arr.size == 0:
+        return {"n": 0.0, "finite_frac": 1.0, "max_abs": 0.0, "std": 0.0}
+    finite = np.isfinite(arr)
+    finite_frac = float(np.mean(finite))
+    arr_f = arr[finite] if np.any(finite) else np.array([], dtype=np.float32)
+    max_abs = float(np.max(np.abs(arr_f))) if arr_f.size else float("nan")
+    std = float(np.std(arr_f)) if arr_f.size else float("nan")
+    return {"n": float(arr.size), "finite_frac": finite_frac, "max_abs": max_abs, "std": std}
+
+
+def _fmt_bool_flag(ok: bool, text: str) -> str:
+    if _USE_RICH:
+        return f"[green]{text}[/green]" if ok else f"[red]{text}[/red]"
+    return text if ok else f"!! {text}"
+
+
+def _fmt_float_flag(value: float, *, ok_min: float | None = None, ok_max: float | None = None, fmt: str = "{:.4f}") -> str:
+    ok = True
+    if ok_min is not None:
+        ok = ok and (value >= ok_min)
+    if ok_max is not None:
+        ok = ok and (value <= ok_max)
+    s = "nan" if not np.isfinite(value) else fmt.format(value)
+    return _fmt_bool_flag(ok, s)
+
+
+def _print_summary_table(title: str, rows: list[tuple[str, str, str, str]]) -> None:
+    if not rows:
+        return
+    if _USE_RICH:
+        table = Table(title=title, show_lines=False)
+        table.add_column("check", overflow="fold")
+        table.add_column("value", overflow="fold")
+        table.add_column("finite", overflow="fold")
+        table.add_column("notes", overflow="fold")
+        for check, value, finite, notes in rows:
+            table.add_row(check, value, finite, notes)
+        console.print(table)
+        return
+
+    print(title)
+    for check, value, finite, notes in rows:
+        print(f"{check}: {value} | {finite} | {notes}")
+
+
+def _print_decoder_input_stats(stats: dict[str, object]) -> None:
+    if not stats:
+        return
+
+    def _cell(v: float, *, kind: str) -> str:
+        if kind == "finite_frac":
+            return _fmt_float_flag(float(v), ok_min=1.0, fmt="{:.3f}")
+        if kind == "nonzero_frac":
+            return _fmt_float_flag(float(v), ok_min=0.0, ok_max=1.0, fmt="{:.3f}")
+        if kind in {"min", "max", "mean", "std"}:
+            return "nan" if not np.isfinite(v) else f"{float(v):.4g}"
+        return str(v)
+
+    rows = []
+    for key in ["asr", "f0", "n", "style_128"]:
+        s = stats.get(key)
+        if s is None:
+            continue
+        if not isinstance(s, dict):
+            continue
+        rows.append(
+            (
+                key,
+                _cell(float(s.get("finite_frac", float("nan"))), kind="finite_frac"),
+                _cell(float(s.get("nonzero_frac", float("nan"))), kind="nonzero_frac"),
+                _cell(float(s.get("min", float("nan"))), kind="min"),
+                _cell(float(s.get("max", float("nan"))), kind="max"),
+                _cell(float(s.get("mean", float("nan"))), kind="mean"),
+                _cell(float(s.get("std", float("nan"))), kind="std"),
+            )
+        )
+
+    if _USE_RICH:
+        table = Table(title="Decoder input stats", show_lines=False)
+        table.add_column("tensor")
+        table.add_column("finite", justify="right")
+        table.add_column("nonzero", justify="right")
+        table.add_column("min", justify="right")
+        table.add_column("max", justify="right")
+        table.add_column("mean", justify="right")
+        table.add_column("std", justify="right")
+        for r in rows:
+            table.add_row(*r)
+        console.print(table)
+    else:
+        print("Decoder input stats:")
+        for r in rows:
+            tensor, finite, nonzero, min_v, max_v, mean_v, std_v = r
+            print(f"  {tensor}: finite={finite} nonzero={nonzero} min={min_v} max={max_v} mean={mean_v} std={std_v}")
+
+
+def _fmt_corr(value: float) -> str:
+    return _fmt_float_flag(value, ok_min=0.7, fmt="{:.4f}")
+
+
+def _fmt_corr_lag(corr: float, lag: int) -> str:
+    return f"corr={_fmt_corr(corr)} lag={lag}"
 
 
 def _build_full_aln_from_pred_dur(pred_dur: np.ndarray, *, cur_len: int) -> tuple[torch.Tensor, int]:
@@ -419,6 +535,8 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="metal", choices=["metal", "llvm", "cuda"], help="TVM device")
     parser.add_argument("--hybrid", action="store_true", help="Hybrid mode (encoder on CPU, decoder on device)")
     parser.add_argument("--save-dir", type=str, default=None, help="If set, write wavs for listening")
+    parser.add_argument("--no-rich", action="store_true", help="Disable Rich formatting (plain text output)")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output (distributions, percentiles, extra tables)")
     parser.add_argument(
         "--cross-decoder",
         action="store_true",
@@ -432,6 +550,8 @@ def main() -> int:
         help="Select style source for TVM pipeline: inference voice pack (default) or HF voice pack (matches PyTorch)",
     )
     args = parser.parse_args()
+
+    _set_use_rich(not args.no_rich)
 
     kp = KPipeline(lang_code=args.lang, model=False)
     chunks = [(r.graphemes, r.phonemes) for r in kp(args.text) if r.phonemes]
@@ -467,6 +587,8 @@ def main() -> int:
     trace_tvm = pipeline.trace(input_ids_tvm, ref_s_tvm, speed=args.speed)
 
     cur_len = int(trace_static["cur_len"])
+    _rule("Inputs")
+    print(f"text={args.text!r} voice={args.voice!r} device={args.device!r} lib_dir={args.lib_dir!r} tvm_ref_s={args.tvm_ref_s!r}")
     print(f"cur_len={cur_len}")
     print(f"frames_dynamic={trace_dyn['frames']}, frames_static={trace_static['frames']}, frames_tvm={trace_tvm['frames']}")
 
@@ -521,13 +643,16 @@ def main() -> int:
 
     _rule("F0/N padded tail (what fills beyond valid frames?)")
     valid_f0n = static_frames * 2
+    print(f"frames_static={static_frames} valid_f0n=2*frames_static={valid_f0n}")
     tvm_f0_pad = trace_tvm.get("f0_pad_summary") or _tail_summary_1d(tvm_f0, valid_f0n)
     tvm_n_pad = trace_tvm.get("n_pad_summary") or _tail_summary_1d(tvm_n, valid_f0n)
     static_f0_pad = _tail_summary_1d(static_f0, valid_f0n)
     static_n_pad = _tail_summary_1d(static_n, valid_f0n)
-    if _RICH_AVAILABLE:
+    if _USE_RICH:
         tail_table = Table(show_lines=False)
         tail_table.add_column("tensor")
+        tail_table.add_column("valid", justify="right")
+        tail_table.add_column("total", justify="right")
         tail_table.add_column("pad", justify="right")
         tail_table.add_column("finite_frac", justify="right")
         tail_table.add_column("nonzero_frac", justify="right")
@@ -541,6 +666,8 @@ def main() -> int:
         ]:
             tail_table.add_row(
                 label,
+                str(s["valid"]),
+                str(s["total"]),
                 str(s["pad"]),
                 f"{float(s['finite_frac']):.3f}",
                 f"{float(s['nonzero_frac']):.3f}",
@@ -556,23 +683,25 @@ def main() -> int:
             ("pt.static n", static_n_pad),
         ]:
             print(
-                f"{label} pad={s['pad']} finite_frac={float(s['finite_frac']):.3f} nonzero_frac={float(s['nonzero_frac']):.3f} "
+                f"{label} valid={s['valid']} total={s['total']} pad={s['pad']} "
+                f"finite_frac={float(s['finite_frac']):.3f} nonzero_frac={float(s['nonzero_frac']):.3f} "
                 f"head={s['head']} tail={s['tail']}"
             )
 
-    _rule("F0/N distribution (valid + padded)")
-    dyn_f0 = np.asarray(trace_dyn["f0"]).reshape(-1)
-    dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
-    _array_percentiles("pt.dynamic f0", dyn_f0)
-    _array_percentiles("pt.dynamic n", dyn_n)
-    _array_percentiles("pt.static f0[:2*frames_static]", static_f0[:valid_f0n])
-    _array_percentiles("pt.static n[:2*frames_static]", static_n[:valid_f0n])
-    _array_percentiles("tvm f0[:2*frames_static]", tvm_f0[:valid_f0n])
-    _array_percentiles("tvm n[:2*frames_static]", tvm_n[:valid_f0n])
-    _array_percentiles("pt.static f0[pad]", static_f0[valid_f0n:])
-    _array_percentiles("pt.static n[pad]", static_n[valid_f0n:])
-    _array_percentiles("tvm f0[pad]", tvm_f0[valid_f0n:])
-    _array_percentiles("tvm n[pad]", tvm_n[valid_f0n:])
+    if args.verbose:
+        _rule("F0/N distribution (valid + padded)")
+        dyn_f0 = np.asarray(trace_dyn["f0"]).reshape(-1)
+        dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
+        _array_percentiles("pt.dynamic f0", dyn_f0)
+        _array_percentiles("pt.dynamic n", dyn_n)
+        _array_percentiles("pt.static f0[:2*frames_static]", static_f0[:valid_f0n])
+        _array_percentiles("pt.static n[:2*frames_static]", static_n[:valid_f0n])
+        _array_percentiles("tvm f0[:2*frames_static]", tvm_f0[:valid_f0n])
+        _array_percentiles("tvm n[:2*frames_static]", tvm_n[:valid_f0n])
+        _array_percentiles("pt.static f0[pad]", static_f0[valid_f0n:])
+        _array_percentiles("pt.static n[pad]", static_n[valid_f0n:])
+        _array_percentiles("tvm f0[pad]", tvm_f0[valid_f0n:])
+        _array_percentiles("tvm n[pad]", tvm_n[valid_f0n:])
 
     audio_static = np.asarray(trace_static["audio_trimmed"]).reshape(-1)
     audio_tvm = np.asarray(trace_tvm["audio_trimmed"]).reshape(-1)
@@ -581,14 +710,7 @@ def main() -> int:
     _array_stats("tvm audio_trimmed", audio_tvm)
     if "decoder_input_stats" in trace_tvm:
         stats = trace_tvm["decoder_input_stats"]
-        print("Decoder input stats (TVM pipeline):")
-        if _RICH_AVAILABLE:
-            console.print(Pretty(stats, expand_all=True))
-        else:
-            print(f"  asr: {stats['asr']}")
-            print(f"  f0:  {stats['f0']}")
-            print(f"  n:   {stats['n']}")
-            print(f"  s:   {stats['style_128']}")
+        _print_decoder_input_stats(stats)
     corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
     print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
 
@@ -636,8 +758,9 @@ def main() -> int:
             ),
         ],
     )
-    _array_percentiles("asr(pt.static)[:prefix_frames]", asr_static[:, :, :prefix_frames])
-    _array_percentiles("asr(tvm)[:prefix_frames]", asr_tvm[:, :, :prefix_frames])
+    if args.verbose:
+        _array_percentiles("asr(pt.static)[:prefix_frames]", asr_static[:, :, :prefix_frames])
+        _array_percentiles("asr(tvm)[:prefix_frames]", asr_tvm[:, :, :prefix_frames])
 
     _rule("Static PyTorch packed vs no-pack (packing semantics impact)")
     _print_metrics_table(
@@ -709,7 +832,8 @@ def main() -> int:
             frames=tvm_frames,
         )
         _array_stats("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm)
-        _array_percentiles("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm, max_samples=100_000)
+        if args.verbose:
+            _array_percentiles("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm, max_samples=100_000)
         corr_x1, lag_x1 = _best_lag_corr(audio_static, audio_pt_from_tvm, max_lag=2400)
         print(f"pt(dec<-tvm) corr(vs pt.static)={corr_x1:.4f} lag={lag_x1} samples")
         corr_x1d, lag_x1d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_pt_from_tvm, max_lag=2400)
@@ -734,7 +858,8 @@ def main() -> int:
             frames=pt_frames,
         )
         _array_stats("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt)
-        _array_percentiles("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt, max_samples=100_000)
+        if args.verbose:
+            _array_percentiles("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt, max_samples=100_000)
         corr_x2, lag_x2 = _best_lag_corr(audio_static, audio_tvm_from_pt, max_lag=2400)
         print(f"tvm(dec<-pt.static) corr(vs pt.static)={corr_x2:.4f} lag={lag_x2} samples")
         corr_x2b2, lag_x2b2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt, max_lag=2400)
@@ -758,7 +883,8 @@ def main() -> int:
             frames=pt_np_frames,
         )
         _array_stats("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np)
-        _array_percentiles("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np, max_samples=100_000)
+        if args.verbose:
+            _array_percentiles("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np, max_samples=100_000)
         corr_x3, lag_x3 = _best_lag_corr(audio_static, audio_tvm_from_pt_np, max_lag=2400)
         print(f"tvm(dec<-pt.no-pack) corr(vs pt.static)={corr_x3:.4f} lag={lag_x3} samples")
         corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
@@ -798,6 +924,47 @@ def main() -> int:
             ("n[:2*prefix_frames]", _metrics(dyn_n[:n_len_dyn], tvm_n[:n_len_dyn])),
         ],
     )
+
+    _rule("Summary")
+    tvm_audio_stats = _summary_stats_1d(audio_tvm)
+    pt_audio_stats = _summary_stats_1d(audio_static)
+    summary_rows: list[tuple[str, str, str, str]] = []
+    summary_rows.append(
+        (
+            "pt.static vs tvm (audio corr/lag)",
+            _fmt_corr_lag(corr, lag),
+            _fmt_float_flag(tvm_audio_stats["finite_frac"], ok_min=1.0, fmt="{:.3f}"),
+            f"tvm max_abs={_fmt_sci(tvm_audio_stats['max_abs'])} std={_fmt_sci(tvm_audio_stats['std'])}",
+        )
+    )
+    summary_rows.append(
+        (
+            "pt.static audio",
+            f"n={int(pt_audio_stats['n'])}",
+            _fmt_float_flag(pt_audio_stats["finite_frac"], ok_min=1.0, fmt="{:.3f}"),
+            f"max_abs={_fmt_sci(pt_audio_stats['max_abs'])} std={_fmt_sci(pt_audio_stats['std'])}",
+        )
+    )
+    if args.cross_decoder:
+        audio_pt_from_tvm_stats = _summary_stats_1d(audio_pt_from_tvm)
+        summary_rows.append(
+            (
+                "pt(dec<-tvm) corr(vs pt.static)",
+                _fmt_corr_lag(corr_x1, lag_x1),
+                _fmt_float_flag(audio_pt_from_tvm_stats["finite_frac"], ok_min=1.0, fmt="{:.3f}"),
+                f"max_abs={_fmt_sci(audio_pt_from_tvm_stats['max_abs'])}",
+            )
+        )
+        audio_tvm_from_pt_stats = _summary_stats_1d(audio_tvm_from_pt)
+        summary_rows.append(
+            (
+                "tvm(dec<-pt.static) corr(vs pt.static)",
+                _fmt_corr_lag(corr_x2, lag_x2),
+                _fmt_float_flag(audio_tvm_from_pt_stats["finite_frac"], ok_min=1.0, fmt="{:.3f}"),
+                f"max_abs={_fmt_sci(audio_tvm_from_pt_stats['max_abs'])}",
+            )
+        )
+    _print_summary_table("Run summary", summary_rows)
 
     if args.save_dir:
         out_dir = Path(args.save_dir)

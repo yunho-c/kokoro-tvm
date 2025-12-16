@@ -1,4 +1,12 @@
 logs/
+outputs/
+tvm_output*/
+tvm_output
+
+# Debug/IR dump artifacts
+decoder_before_opt.py
+decoder_decomposed.py
+decoder_legalized.py
 
 # Python
 __pycache__/
