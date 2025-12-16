@@ -28,6 +28,53 @@ from kokoro.pipeline import KPipeline
 from kokoro_tvm.cli.inference import load_voice_pack, select_ref_s, text_to_ids
 from kokoro_tvm.pipeline import KokoroPipeline, SAMPLES_PER_FRAME, STATIC_AUDIO_LEN, STATIC_TEXT_LEN
 
+try:
+    from rich.console import Console
+    from rich.pretty import Pretty
+    from rich.table import Table
+
+    _RICH_AVAILABLE = True
+    console = Console()
+except ImportError:
+    _RICH_AVAILABLE = False
+    console = None
+
+
+if _RICH_AVAILABLE:
+    print = console.print  # type: ignore[assignment]
+
+
+def _rule(title: str) -> None:
+    if _RICH_AVAILABLE:
+        console.rule(title)
+    else:
+        print(f"\n{title}\n" + "-" * len(title))
+
+
+def _fmt_sci(x: float) -> str:
+    if not np.isfinite(x):
+        return "nan"
+    return f"{x:.3e}"
+
+
+def _print_metrics_table(title: str, rows: list[tuple[str, dict[str, float]]]) -> None:
+    if not rows:
+        return
+    if _RICH_AVAILABLE:
+        table = Table(title=title, show_lines=False)
+        table.add_column("name", overflow="fold")
+        table.add_column("mae", justify="right")
+        table.add_column("max_abs", justify="right")
+        table.add_column("rmse", justify="right")
+        for name, m in rows:
+            table.add_row(name, _fmt_sci(m["mae"]), _fmt_sci(m["max_abs"]), _fmt_sci(m["rmse"]))
+        console.print(table)
+        return
+
+    print(title)
+    for name, m in rows:
+        print(f"{name}: mae={_fmt_sci(m['mae'])} max_abs={_fmt_sci(m['max_abs'])} rmse={_fmt_sci(m['rmse'])}")
+
 
 def _normalize(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32, copy=False)
@@ -423,33 +470,42 @@ def main() -> int:
     print(f"cur_len={cur_len}")
     print(f"frames_dynamic={trace_dyn['frames']}, frames_static={trace_static['frames']}, frames_tvm={trace_tvm['frames']}")
 
-    def show(name: str, a: np.ndarray, b: np.ndarray):
-        m = _metrics(a, b)
-        print(f"{name}: mae={m['mae']:.3e} max_abs={m['max_abs']:.3e} rmse={m['rmse']:.3e}")
+    _print_metrics_table(
+        "Style vectors",
+        [
+            ("ref_s(hf) vs ref_s(inference)", _metrics(ref_s_hf.numpy(), ref_s_inference.numpy())),
+            ("ref_s(hf) vs ref_s(tvm used)", _metrics(ref_s_hf.numpy(), ref_s_tvm.numpy())),
+        ],
+    )
 
-    show("ref_s(hf) vs ref_s(inference)", ref_s_hf.numpy(), ref_s_inference.numpy())
-    show("ref_s(hf) vs ref_s(tvm used)", ref_s_hf.numpy(), ref_s_tvm.numpy())
-
-    print("\nStatic PyTorch vs TVM (module fidelity):")
-    show(
-        "bert.d_en[:cur_len]",
-        np.asarray(trace_static["d_en"])[:, :, :cur_len],
-        np.asarray(trace_tvm["d_en"])[:, :, :cur_len],
+    _rule("Static PyTorch vs TVM (module fidelity)")
+    module_rows: list[tuple[str, dict[str, float]]] = []
+    module_rows.append(
+        (
+            "bert.d_en[:cur_len]",
+            _metrics(np.asarray(trace_static["d_en"])[:, :, :cur_len], np.asarray(trace_tvm["d_en"])[:, :, :cur_len]),
+        )
     )
-    show(
-        "duration.logits[:cur_len]",
-        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
-        np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
+    module_rows.append(
+        (
+            "duration.logits[:cur_len]",
+            _metrics(
+                np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+                np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
+            ),
+        )
     )
-    show(
-        "duration.d[:cur_len]",
-        np.asarray(trace_static["d"])[:, :cur_len, :],
-        np.asarray(trace_tvm["d"])[:, :cur_len, :],
+    module_rows.append(
+        (
+            "duration.d[:cur_len]",
+            _metrics(np.asarray(trace_static["d"])[:, :cur_len, :], np.asarray(trace_tvm["d"])[:, :cur_len, :]),
+        )
     )
-    show(
-        "text_encoder.t_en[:cur_len]",
-        np.asarray(trace_static["t_en"])[:, :, :cur_len],
-        np.asarray(trace_tvm["t_en"])[:, :, :cur_len],
+    module_rows.append(
+        (
+            "text_encoder.t_en[:cur_len]",
+            _metrics(np.asarray(trace_static["t_en"])[:, :, :cur_len], np.asarray(trace_tvm["t_en"])[:, :, :cur_len]),
+        )
     )
 
     static_frames = int(trace_static["frames"])
@@ -458,38 +514,53 @@ def main() -> int:
     static_f0 = np.asarray(trace_static["f0"]).reshape(-1)
     static_n = np.asarray(trace_static["n"]).reshape(-1)
     f_len = min(static_f0.size, tvm_f0.size, static_frames * 2)
-    show("f0[:2*frames_static]", static_f0[:f_len], tvm_f0[:f_len])
+    module_rows.append(("f0[:2*frames_static]", _metrics(static_f0[:f_len], tvm_f0[:f_len])))
     n_len = min(static_n.size, tvm_n.size, static_frames * 2)
-    show("n[:2*frames_static]", static_n[:n_len], tvm_n[:n_len])
+    module_rows.append(("n[:2*frames_static]", _metrics(static_n[:n_len], tvm_n[:n_len])))
+    _print_metrics_table("Module fidelity", module_rows)
 
-    print("\nF0/N padded tail (what fills beyond valid frames?):")
+    _rule("F0/N padded tail (what fills beyond valid frames?)")
     valid_f0n = static_frames * 2
     tvm_f0_pad = trace_tvm.get("f0_pad_summary") or _tail_summary_1d(tvm_f0, valid_f0n)
     tvm_n_pad = trace_tvm.get("n_pad_summary") or _tail_summary_1d(tvm_n, valid_f0n)
     static_f0_pad = _tail_summary_1d(static_f0, valid_f0n)
     static_n_pad = _tail_summary_1d(static_n, valid_f0n)
-    print(
-        "tvm.f0 pad="
-        f"{tvm_f0_pad['pad']} finite_frac={tvm_f0_pad['finite_frac']:.3f} nonzero_frac={tvm_f0_pad['nonzero_frac']:.3f} "
-        f"head={tvm_f0_pad['head']} tail={tvm_f0_pad['tail']}"
-    )
-    print(
-        "tvm.n  pad="
-        f"{tvm_n_pad['pad']} finite_frac={tvm_n_pad['finite_frac']:.3f} nonzero_frac={tvm_n_pad['nonzero_frac']:.3f} "
-        f"head={tvm_n_pad['head']} tail={tvm_n_pad['tail']}"
-    )
-    print(
-        "pt.static f0 pad="
-        f"{static_f0_pad['pad']} finite_frac={static_f0_pad['finite_frac']:.3f} nonzero_frac={static_f0_pad['nonzero_frac']:.3f} "
-        f"head={static_f0_pad['head']} tail={static_f0_pad['tail']}"
-    )
-    print(
-        "pt.static n  pad="
-        f"{static_n_pad['pad']} finite_frac={static_n_pad['finite_frac']:.3f} nonzero_frac={static_n_pad['nonzero_frac']:.3f} "
-        f"head={static_n_pad['head']} tail={static_n_pad['tail']}"
-    )
+    if _RICH_AVAILABLE:
+        tail_table = Table(show_lines=False)
+        tail_table.add_column("tensor")
+        tail_table.add_column("pad", justify="right")
+        tail_table.add_column("finite_frac", justify="right")
+        tail_table.add_column("nonzero_frac", justify="right")
+        tail_table.add_column("head")
+        tail_table.add_column("tail")
+        for label, s in [
+            ("tvm.f0", tvm_f0_pad),
+            ("tvm.n", tvm_n_pad),
+            ("pt.static f0", static_f0_pad),
+            ("pt.static n", static_n_pad),
+        ]:
+            tail_table.add_row(
+                label,
+                str(s["pad"]),
+                f"{float(s['finite_frac']):.3f}",
+                f"{float(s['nonzero_frac']):.3f}",
+                str(s["head"]),
+                str(s["tail"]),
+            )
+        console.print(tail_table)
+    else:
+        for label, s in [
+            ("tvm.f0", tvm_f0_pad),
+            ("tvm.n", tvm_n_pad),
+            ("pt.static f0", static_f0_pad),
+            ("pt.static n", static_n_pad),
+        ]:
+            print(
+                f"{label} pad={s['pad']} finite_frac={float(s['finite_frac']):.3f} nonzero_frac={float(s['nonzero_frac']):.3f} "
+                f"head={s['head']} tail={s['tail']}"
+            )
 
-    print("\nF0/N distribution (valid + padded):")
+    _rule("F0/N distribution (valid + padded)")
     dyn_f0 = np.asarray(trace_dyn["f0"]).reshape(-1)
     dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
     _array_percentiles("pt.dynamic f0", dyn_f0)
@@ -505,29 +576,39 @@ def main() -> int:
 
     audio_static = np.asarray(trace_static["audio_trimmed"]).reshape(-1)
     audio_tvm = np.asarray(trace_tvm["audio_trimmed"]).reshape(-1)
-    print("\nDecoder audio stats:")
+    _rule("Decoder audio stats")
     _array_stats("pt.static audio_trimmed", audio_static)
     _array_stats("tvm audio_trimmed", audio_tvm)
     if "decoder_input_stats" in trace_tvm:
         stats = trace_tvm["decoder_input_stats"]
         print("Decoder input stats (TVM pipeline):")
-        print(f"  asr: {stats['asr']}")
-        print(f"  f0:  {stats['f0']}")
-        print(f"  n:   {stats['n']}")
-        print(f"  s:   {stats['style_128']}")
+        if _RICH_AVAILABLE:
+            console.print(Pretty(stats, expand_all=True))
+        else:
+            print(f"  asr: {stats['asr']}")
+            print(f"  f0:  {stats['f0']}")
+            print(f"  n:   {stats['n']}")
+            print(f"  s:   {stats['style_128']}")
     corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
     print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
 
-    print("\nAlignment/ASR (decoder conditioning) fidelity:")
+    _rule("Alignment/ASR (decoder conditioning) fidelity")
     tvm_pred_dur = np.asarray(trace_tvm["pred_dur"]).reshape(-1)
     static_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
     static_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
 
-    show("pred_dur(pt.static)[:cur_len]", static_pred_dur[:cur_len].astype(np.float32), tvm_pred_dur[:cur_len].astype(np.float32))
-    show(
-        "pred_dur(pt.no-pack)[:cur_len]",
-        static_np_pred_dur[:cur_len].astype(np.float32),
-        tvm_pred_dur[:cur_len].astype(np.float32),
+    _print_metrics_table(
+        "pred_dur",
+        [
+            (
+                "pred_dur(pt.static)[:cur_len]",
+                _metrics(static_pred_dur[:cur_len].astype(np.float32), tvm_pred_dur[:cur_len].astype(np.float32)),
+            ),
+            (
+                "pred_dur(pt.no-pack)[:cur_len]",
+                _metrics(static_np_pred_dur[:cur_len].astype(np.float32), tvm_pred_dur[:cur_len].astype(np.float32)),
+            ),
+        ],
     )
 
     asr_tvm, frames_tvm_recon = _compute_asr_from_trace(trace_tvm, cur_len=cur_len)
@@ -542,29 +623,41 @@ def main() -> int:
         print(f"Warning: tvm frames mismatch (trace={frames_tvm}, recon={frames_tvm_recon})")
 
     prefix_frames = min(frames_static_recon, frames_tvm_recon)
-    show(
-        "asr(pt.static)[:prefix_frames]",
-        asr_static[:, :, :prefix_frames],
-        asr_tvm[:, :, :prefix_frames],
-    )
-    show(
-        "asr(pt.no-pack)[:prefix_frames]",
-        asr_static_np[:, :, :prefix_frames],
-        asr_tvm[:, :, :prefix_frames],
+    _print_metrics_table(
+        "asr",
+        [
+            (
+                "asr(pt.static)[:prefix_frames]",
+                _metrics(asr_static[:, :, :prefix_frames], asr_tvm[:, :, :prefix_frames]),
+            ),
+            (
+                "asr(pt.no-pack)[:prefix_frames]",
+                _metrics(asr_static_np[:, :, :prefix_frames], asr_tvm[:, :, :prefix_frames]),
+            ),
+        ],
     )
     _array_percentiles("asr(pt.static)[:prefix_frames]", asr_static[:, :, :prefix_frames])
     _array_percentiles("asr(tvm)[:prefix_frames]", asr_tvm[:, :, :prefix_frames])
 
-    print("\nStatic PyTorch packed vs no-pack (packing semantics impact):")
-    show(
-        "duration.logits[:cur_len]",
-        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
-        np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
-    )
-    show(
-        "text_encoder.t_en[:cur_len]",
-        np.asarray(trace_static["t_en"])[:, :, :cur_len],
-        np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
+    _rule("Static PyTorch packed vs no-pack (packing semantics impact)")
+    _print_metrics_table(
+        "packed vs no-pack",
+        [
+            (
+                "duration.logits[:cur_len]",
+                _metrics(
+                    np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+                    np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
+                ),
+            ),
+            (
+                "text_encoder.t_en[:cur_len]",
+                _metrics(
+                    np.asarray(trace_static["t_en"])[:, :, :cur_len],
+                    np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
+                ),
+            ),
+        ],
     )
     corr_np, lag_np = _best_lag_corr(
         np.asarray(trace_static["audio_trimmed"]).reshape(-1),
@@ -573,22 +666,31 @@ def main() -> int:
     )
     print(f"audio_trimmed corr={corr_np:.4f} lag={lag_np} samples")
 
-    print("\nStatic PyTorch no-pack vs TVM (does TVM match no-pack semantics?):")
-    show(
-        "duration.logits[:cur_len]",
-        np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
-        np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
-    )
-    show(
-        "text_encoder.t_en[:cur_len]",
-        np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
-        np.asarray(trace_tvm["t_en"])[:, :, :cur_len],
+    _rule("Static PyTorch no-pack vs TVM (does TVM match no-pack semantics?)")
+    _print_metrics_table(
+        "no-pack vs tvm",
+        [
+            (
+                "duration.logits[:cur_len]",
+                _metrics(
+                    np.asarray(trace_static_nopack["duration_logits"])[:, :cur_len, :],
+                    np.asarray(trace_tvm["duration_logits"])[:, :cur_len, :],
+                ),
+            ),
+            (
+                "text_encoder.t_en[:cur_len]",
+                _metrics(
+                    np.asarray(trace_static_nopack["t_en"])[:, :, :cur_len],
+                    np.asarray(trace_tvm["t_en"])[:, :, :cur_len],
+                ),
+            ),
+        ],
     )
     corr_np2, lag_np2 = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm, 2400)
     print(f"decoder.audio_trimmed corr={corr_np2:.4f} lag={lag_np2} samples")
 
     if args.cross_decoder:
-        print("\nCrossed decoder inputs (encoder->decoder matrix):")
+        _rule("Crossed decoder inputs (encoder->decoder matrix)")
 
         tvm_full_aln, tvm_frames = _build_full_aln_from_pred_dur(tvm_pred_dur, cur_len=cur_len)
         tvm_t_en = torch.as_tensor(np.asarray(trace_tvm["t_en"]), dtype=torch.float32)
@@ -662,23 +764,23 @@ def main() -> int:
         corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
         print(f"tvm(dec<-pt.no-pack) corr(vs pt.no-pack)={corr_x3b:.4f} lag={lag_x3b} samples")
 
-    print("\nDynamic PyTorch vs Static PyTorch (shape/static padding impact):")
-    show(
-        "bert.d_en[:cur_len]",
-        np.asarray(trace_dyn["d_en"]),
-        np.asarray(trace_static["d_en"])[:, :, :cur_len],
+    _rule("Dynamic PyTorch vs Static PyTorch (shape/static padding impact)")
+    _print_metrics_table(
+        "dynamic vs static",
+        [
+            ("bert.d_en[:cur_len]", _metrics(np.asarray(trace_dyn["d_en"]), np.asarray(trace_static["d_en"])[:, :, :cur_len])),
+            (
+                "duration.logits",
+                _metrics(np.asarray(trace_dyn["duration_logits"]), np.asarray(trace_static["duration_logits"])[:, :cur_len, :]),
+            ),
+            ("duration.d", _metrics(np.asarray(trace_dyn["d"]), np.asarray(trace_static["d"])[:, :cur_len, :])),
+            ("text_encoder.t_en", _metrics(np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len])),
+        ],
     )
-    show(
-        "duration.logits",
-        np.asarray(trace_dyn["duration_logits"]),
-        np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
-    )
-    show("duration.d", np.asarray(trace_dyn["d"]), np.asarray(trace_static["d"])[:, :cur_len, :])
-    show("text_encoder.t_en", np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len])
     corr2, lag2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]), audio_static, max_lag=2400)
     print(f"audio_trimmed corr={corr2:.4f} lag={lag2} samples")
 
-    print("\nDynamic PyTorch vs TVM (aligned-length F0/N):")
+    _rule("Dynamic PyTorch vs TVM (aligned-length F0/N)")
     dyn_frames = int(trace_dyn["frames"])
     tvm_frames = int(trace_tvm["frames"])
     prefix_frames = min(dyn_frames, tvm_frames)
@@ -689,8 +791,13 @@ def main() -> int:
     dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
     f_len_dyn = min(dyn_f0.size, tvm_f0.size, prefix_frames * 2)
     n_len_dyn = min(dyn_n.size, tvm_n.size, prefix_frames * 2)
-    show("f0[:2*prefix_frames]", dyn_f0[:f_len_dyn], tvm_f0[:f_len_dyn])
-    show("n[:2*prefix_frames]", dyn_n[:n_len_dyn], tvm_n[:n_len_dyn])
+    _print_metrics_table(
+        "aligned-length F0/N",
+        [
+            ("f0[:2*prefix_frames]", _metrics(dyn_f0[:f_len_dyn], tvm_f0[:f_len_dyn])),
+            ("n[:2*prefix_frames]", _metrics(dyn_n[:n_len_dyn], tvm_n[:n_len_dyn])),
+        ],
+    )
 
     if args.save_dir:
         out_dir = Path(args.save_dir)

@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = []
+dependencies = ["rich>=13.7.0"]
 
 [project.urls]
 Documentation = "https://github.com/yunho-c/kokoro-tvm#readme"
@@ -159,6 +159,7 @@ cxx-compiler = "*"
 
 [tool.pixi.pypi-dependencies]
 soundfile = "*"
+rich = "*"
 apache-tvm-ffi = { path = "../reference/tvm/3rdparty/tvm-ffi", editable = true }
 kokoro = { path = "../external/kokoro", editable = true }
 kokoro-tvm = { path = ".", editable = true }
