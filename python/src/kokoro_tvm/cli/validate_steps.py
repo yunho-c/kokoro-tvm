@@ -424,6 +424,21 @@ def _pad_2d_time(x: np.ndarray, *, target_t: int) -> np.ndarray:
     return out
 
 
+def _pad_last_dim(x: np.ndarray, *, target_t: int) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim < 1:
+        raise ValueError(f"Expected >=1D tensor, got shape={arr.shape}")
+    t = int(arr.shape[-1])
+    target_t = int(target_t)
+    if t == target_t:
+        return arr
+    if t > target_t:
+        return arr[..., :target_t]
+    out = np.zeros((*arr.shape[:-1], target_t), dtype=np.float32)
+    out[..., :t] = arr
+    return out
+
+
 def _compute_asr_from_trace(trace: dict[str, object], *, cur_len: int) -> tuple[np.ndarray, int]:
     return _compute_asr_from_trace_with_target(trace, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
 
@@ -535,8 +550,12 @@ def _trace_static(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: flo
         full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
         full_aln[0, :cur_len, :] = pred_aln_trg[0]
 
-        en = d.transpose(-1, -2) @ full_aln
-        f0_pred, n_pred = kmodel.predictor.F0Ntrain(en, s)
+        pred_aln_trg_prefix = pred_aln_trg[:, :, :frames]
+        d_prefix = d[:, :cur_len, :]
+        en_prefix = d_prefix.transpose(-1, -2) @ pred_aln_trg_prefix
+        f0_prefix, n_prefix = kmodel.predictor.F0Ntrain(en_prefix, s)
+        f0_pred = torch.as_tensor(_pad_last_dim(f0_prefix.numpy(), target_t=STATIC_AUDIO_LEN * 2), dtype=torch.float32)
+        n_pred = torch.as_tensor(_pad_last_dim(n_prefix.numpy(), target_t=STATIC_AUDIO_LEN * 2), dtype=torch.float32)
         t_en = kmodel.text_encoder(input_ids, input_lengths, text_mask)
         asr = t_en @ full_aln
         audio = kmodel.decoder(asr, f0_pred, n_pred, ref_s[:, :128]).squeeze().cpu()
