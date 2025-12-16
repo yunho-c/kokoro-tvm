@@ -17,6 +17,7 @@ from kokoro.istftnet import Decoder
 from tvm.relax.frontend.torch.exported_program_translator import ExportedProgramImporter
 
 from kokoro_tvm import tvm_extensions  # noqa: F401 - apply TVM patches
+from kokoro_tvm.patches.adain import apply_adain_patch
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 
 
@@ -54,6 +55,7 @@ def create_decoder_module(
     """
     # Apply patches before export
     apply_sinegen_patch()
+    apply_adain_patch()
 
     # Load config from HuggingFace
     repo_id = "hexgrad/Kokoro-82M"

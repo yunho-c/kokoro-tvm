@@ -13,6 +13,7 @@ from tvm import relax
 
 from kokoro_tvm import tvm_extensions  # applies TVM patches on import
 from kokoro_tvm.config import TARGET_CONFIGS, resolve_target
+from kokoro_tvm.patches.adain import apply_adain_patch
 from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 
 
@@ -32,6 +33,12 @@ def main():
                         help="Skip loading pretrained weights (use random weights for faster iteration)")
     parser.add_argument("--validate", action="store_true",
                         help="Validate TVM output against PyTorch using real encoder data")
+    parser.add_argument("--no-dlight", action="store_true",
+                        help="Skip DLight GPU scheduling (useful to debug numerical issues on Metal)")
+    parser.add_argument("--no-fuse", action="store_true",
+                        help="Skip FuseOps/FuseTIR (useful to debug fusion-related issues)")
+    parser.add_argument("--dlight-fallback-only", action="store_true",
+                        help="Apply only DLight Fallback scheduling (can help debug incorrect schedules)")
 
     # Tuning arguments
     parser.add_argument("--tune", action="store_true",
@@ -58,6 +65,7 @@ def main():
 
     # Apply patches
     apply_sinegen_patch()
+    apply_adain_patch()
 
     # Compile decoder
     compile_decoder(args, target)
@@ -133,42 +141,53 @@ def compile_decoder(args, target):
             )(mod)
             print("Best schedules applied.")
 
-        print("Running AnnotateTIROpPattern...")
-        mod = relax.transform.AnnotateTIROpPattern()(mod)
+        if not args.no_fuse:
+            print("Running AnnotateTIROpPattern...")
+            mod = relax.transform.AnnotateTIROpPattern()(mod)
 
         print("Running FoldConstant...")
         # mod = relax.transform.FoldConstant()(mod)
 
-        print("Running FuseOps...")
-        mod = relax.transform.FuseOps()(mod)
+        if not args.no_fuse:
+            print("Running FuseOps...")
+            mod = relax.transform.FuseOps()(mod)
 
-        print("Running FuseTIR...")
-        mod = relax.transform.FuseTIR()(mod)
+            print("Running FuseTIR...")
+            mod = relax.transform.FuseTIR()(mod)
 
         # Apply GPU scheduling for Metal targets
         if is_metal:
-            print("Applying DLight GPU scheduling for Metal...")
-            from tvm import dlight as dl
-            try:
-                # Use specialized rules for better performance
-                # Note: GEMV is excluded due to crash on compound iteration patterns
-                # (KeyError in normalize() for complex spatial indexing like v_yy * 5 + v_ry)
-                mod = dl.ApplyDefaultSchedule(
-                    dl.gpu.Matmul(),           # Optimized tiling + shared memory for matmuls
-                    dl.gpu.Reduction(),        # Parallel reduction trees
-                    dl.gpu.GeneralReduction(), # Multi-axis reductions
-                    dl.gpu.Fallback(),         # Basic parallelization for everything else
-                )(mod)
-                print("DLight scheduling applied (Matmul + Reduction + Fallback).")
-            except Exception as e:
-                print(f"Warning: DLight scheduling failed: {e}")
-                print("Retrying with Fallback only...")
+            if args.no_dlight:
+                print("Skipping DLight GPU scheduling (--no-dlight).")
+            elif args.no_fuse:
+                print("Skipping DLight GPU scheduling because fusion is disabled (--no-fuse).")
+            else:
+                print("Applying DLight GPU scheduling for Metal...")
+                from tvm import dlight as dl
                 try:
-                    mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
-                    print("DLight Fallback scheduling applied.")
-                except Exception as e2:
-                    print(f"Warning: DLight Fallback also failed: {e2}")
-                    print("Continuing without DLight scheduling...")
+                    if args.dlight_fallback_only:
+                        mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
+                        print("DLight scheduling applied (Fallback only).")
+                    else:
+                        # Use specialized rules for better performance
+                        # Note: GEMV is excluded due to crash on compound iteration patterns
+                        # (KeyError in normalize() for complex spatial indexing like v_yy * 5 + v_ry)
+                        mod = dl.ApplyDefaultSchedule(
+                            dl.gpu.Matmul(),           # Optimized tiling + shared memory for matmuls
+                            dl.gpu.Reduction(),        # Parallel reduction trees
+                            dl.gpu.GeneralReduction(), # Multi-axis reductions
+                            dl.gpu.Fallback(),         # Basic parallelization for everything else
+                        )(mod)
+                        print("DLight scheduling applied (Matmul + Reduction + Fallback).")
+                except Exception as e:
+                    print(f"Warning: DLight scheduling failed: {e}")
+                    print("Retrying with Fallback only...")
+                    try:
+                        mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
+                        print("DLight Fallback scheduling applied.")
+                    except Exception as e2:
+                        print(f"Warning: DLight Fallback also failed: {e2}")
+                        print("Continuing without DLight scheduling...")
 
     # Build with debug info disabled to avoid LLVM verification bug
     print("Building with standard Relax pipeline (debug info disabled)...")

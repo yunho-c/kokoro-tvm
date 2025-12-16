@@ -25,6 +25,74 @@ SAMPLES_PER_FRAME = 600
 DEBUG = True
 
 
+def _tail_summary(x: np.ndarray, valid: int, *, preview: int = 8, atol: float = 0.0) -> dict[str, object]:
+    flat = np.asarray(x).reshape(-1)
+    total = int(flat.size)
+    valid = int(max(0, min(valid, total)))
+    pad = flat[valid:]
+
+    if pad.size == 0:
+        return {
+            "valid": valid,
+            "total": total,
+            "pad": 0,
+            "finite_frac": 1.0,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "nonzero_frac": 0.0,
+            "nonzero_atol": atol,
+            "head": [],
+            "tail": [],
+        }
+
+    pad_f32 = pad.astype(np.float32, copy=False)
+    finite = np.isfinite(pad_f32)
+    finite_frac = float(np.mean(finite)) if pad_f32.size else 1.0
+
+    abs_pad = np.abs(pad_f32[finite]) if np.any(finite) else np.array([], dtype=np.float32)
+    max_abs = float(np.max(abs_pad)) if abs_pad.size else float("nan")
+    mean_abs = float(np.mean(abs_pad)) if abs_pad.size else float("nan")
+    nonzero_frac = float(np.mean(np.abs(pad_f32) > atol)) if pad_f32.size else 0.0
+
+    head = pad_f32[:preview].tolist()
+    tail = pad_f32[-preview:].tolist() if pad_f32.size >= preview else pad_f32.tolist()
+
+    return {
+        "valid": valid,
+        "total": total,
+        "pad": int(pad_f32.size),
+        "finite_frac": finite_frac,
+        "max_abs": max_abs,
+        "mean_abs": mean_abs,
+        "nonzero_frac": nonzero_frac,
+        "nonzero_atol": atol,
+        "head": head,
+        "tail": tail,
+    }
+
+
+def _stats_summary(x: np.ndarray, *, atol: float = 1e-8) -> dict[str, float]:
+    arr = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    if arr.size == 0:
+        return {"finite_frac": 1.0, "nonzero_frac": 0.0, "min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
+    finite = np.isfinite(arr)
+    finite_frac = float(np.mean(finite))
+    arr_f = arr[finite] if np.any(finite) else np.array([], dtype=np.float32)
+    min_v = float(np.min(arr_f)) if arr_f.size else float("nan")
+    max_v = float(np.max(arr_f)) if arr_f.size else float("nan")
+    mean_v = float(np.mean(arr_f)) if arr_f.size else float("nan")
+    std_v = float(np.std(arr_f)) if arr_f.size else float("nan")
+    nonzero_frac = float(np.mean(np.abs(arr) > atol))
+    return {
+        "finite_frac": finite_frac,
+        "nonzero_frac": nonzero_frac,
+        "min": min_v,
+        "max": max_v,
+        "mean": mean_v,
+        "std": std_v,
+    }
+
+
 class KokoroPipeline:
     def __init__(self, lib_dir: str, device_target: str = "llvm", hybrid: bool = False):
         """Initialize pipeline with compiled TVM modules.
@@ -57,6 +125,8 @@ class KokoroPipeline:
         else:
             print(f"Loading modules on {self.gpu_dev}...")
             self._load_single_device()
+
+        self._f0n_accepts_lengths: bool | None = None
 
     def _load_single_device(self):
         """Load all modules on the same device."""
@@ -116,6 +186,32 @@ class KokoroPipeline:
             if len(obj) == 1:
                 return obj[0]
         return obj
+
+    def _call_f0n(self, en, s, frame_lengths, enc_dev: tvm.runtime.Device):
+        """Call f0n_forward with best-effort support for legacy signatures.
+
+        Newer builds export: f0n_forward(en, style, frame_lengths).
+        Older builds export: f0n_forward(en, style).
+        """
+        if self._f0n_accepts_lengths is None:
+            try:
+                out = self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev))
+                self._f0n_accepts_lengths = True
+                return out
+            except tvm.error.TVMError as e:
+                msg = str(e)
+                if "expects 2 arguments" in msg and "but 3 arguments were provided" in msg:
+                    print(
+                        "Warning: f0n_forward uses legacy signature (en, style). "
+                        "Recompile encoder f0n to enable frame_lengths-aware behavior."
+                    )
+                    self._f0n_accepts_lengths = False
+                else:
+                    raise
+
+        if self._f0n_accepts_lengths:
+            return self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev))
+        return self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev))
 
     def _debug(self, msg: str, start_time: float = None):
         """Print debug message with optional elapsed time."""
@@ -221,13 +317,8 @@ class KokoroPipeline:
         # F0N module: en, s, frame_lengths -> (F0, N)
         t4 = time.time()
         self._debug("Running F0N module (CPU)..." if self.hybrid else "Running F0N module...")
-        frame_lengths = torch.tensor([actual_audio_len], dtype=torch.long)
-        f0n_inputs = [
-            tvm.runtime.tensor(en.numpy(), device=enc_dev),
-            tvm.runtime.tensor(s, device=enc_dev),
-            tvm.runtime.tensor(frame_lengths.numpy(), device=enc_dev),
-        ]
-        f0n_out = self.f_f0n(*f0n_inputs)
+        frame_lengths = np.array([actual_audio_len], dtype=np.int64)
+        f0n_out = self._call_f0n(tvm.runtime.tensor(en.numpy(), device=enc_dev), s, frame_lengths, enc_dev)
         f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out
         n_tvm = f0n_out[1] if hasattr(f0n_out, "__getitem__") and len(f0n_out) > 1 else None
         self._debug("F0N done", t4)
@@ -360,18 +451,24 @@ class KokoroPipeline:
 
         d = torch.from_numpy(d_tvm.numpy()) if d_tvm is not None else torch.zeros(1, STATIC_TEXT_LEN, 640)
         en = d.transpose(-1, -2) @ full_aln
+        en_np = en.numpy()
+        out["en_pad_summary"] = _tail_summary(en_np[:, :, actual_audio_len:], 0, preview=8, atol=0.0)
 
-        f0n_inputs = [
-            tvm.runtime.tensor(en.numpy(), device=enc_dev),
-            tvm.runtime.tensor(s, device=enc_dev),
-            tvm.runtime.tensor(np.array([actual_audio_len], dtype=np.int64), device=enc_dev),
-        ]
-        f0n_out = self.f_f0n(*f0n_inputs)
+        frame_lengths = np.array([actual_audio_len], dtype=np.int64)
+        out["f0n_frame_lengths"] = frame_lengths.copy()
+        f0n_out = self._call_f0n(tvm.runtime.tensor(en_np, device=enc_dev), s, frame_lengths, enc_dev)
         f0_tvm = self._unwrap(f0n_out[0]) if hasattr(f0n_out, "__getitem__") else f0n_out
         n_tvm = f0n_out[1] if hasattr(f0n_out, "__getitem__") and len(f0n_out) > 1 else None
 
-        out["f0"] = f0_tvm.numpy()
-        out["n"] = n_tvm.numpy() if n_tvm is not None else None
+        f0_np = f0_tvm.numpy()
+        n_np = n_tvm.numpy() if n_tvm is not None else None
+        out["f0"] = f0_np
+        out["n"] = n_np
+
+        # F0/N are typically 2x aligned frames; summarize the padded tail to ensure it is truly zeroed.
+        valid_f0n = int(actual_audio_len) * 2
+        out["f0_pad_summary"] = _tail_summary(f0_np, valid_f0n, preview=8, atol=1e-6)
+        out["n_pad_summary"] = _tail_summary(n_np, valid_f0n, preview=8, atol=1e-6) if n_np is not None else None
 
         text_enc_inputs = [
             tvm.runtime.tensor(input_ids.numpy(), device=enc_dev),
@@ -383,6 +480,12 @@ class KokoroPipeline:
         out["t_en"] = t_en_tvm.numpy()
 
         asr = t_en @ full_aln
+        out["decoder_input_stats"] = {
+            "asr": _stats_summary(asr.numpy()),
+            "f0": _stats_summary(f0_np),
+            "n": _stats_summary(n_np) if n_np is not None else None,
+            "style_128": _stats_summary(ref_s[:, :128].numpy()),
+        }
         decoder_inputs = [
             tvm.runtime.tensor(asr.numpy(), device=dec_dev),
             tvm.runtime.tensor(f0_tvm.numpy(), device=dec_dev),

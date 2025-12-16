@@ -77,6 +77,49 @@ def _best_lag_corr(a: np.ndarray, b: np.ndarray, max_lag: int = 2400) -> tuple[f
     return best
 
 
+def _tail_summary_1d(x: np.ndarray, valid: int, *, preview: int = 8, atol: float = 1e-6) -> dict[str, object]:
+    flat = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    total = int(flat.size)
+    valid = int(max(0, min(valid, total)))
+    pad = flat[valid:]
+    if pad.size == 0:
+        return {"valid": valid, "total": total, "pad": 0, "finite_frac": 1.0, "nonzero_frac": 0.0, "head": [], "tail": []}
+    finite = np.isfinite(pad)
+    finite_frac = float(np.mean(finite))
+    nonzero_frac = float(np.mean(np.abs(pad) > atol))
+    head = pad[:preview].tolist()
+    tail = pad[-preview:].tolist() if pad.size >= preview else pad.tolist()
+    return {
+        "valid": valid,
+        "total": total,
+        "pad": int(pad.size),
+        "finite_frac": finite_frac,
+        "nonzero_frac": nonzero_frac,
+        "nonzero_atol": atol,
+        "head": head,
+        "tail": tail,
+    }
+
+
+def _array_stats(name: str, x: np.ndarray, *, atol: float = 1e-8) -> None:
+    arr = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    if arr.size == 0:
+        print(f"{name}: empty")
+        return
+    finite = np.isfinite(arr)
+    finite_frac = float(np.mean(finite))
+    arr_f = arr[finite] if np.any(finite) else np.array([], dtype=np.float32)
+    min_v = float(np.min(arr_f)) if arr_f.size else float("nan")
+    max_v = float(np.max(arr_f)) if arr_f.size else float("nan")
+    mean_v = float(np.mean(arr_f)) if arr_f.size else float("nan")
+    std_v = float(np.std(arr_f)) if arr_f.size else float("nan")
+    nonzero_frac = float(np.mean(np.abs(arr) > atol))
+    print(
+        f"{name}: n={arr.size} finite_frac={finite_frac:.4f} nonzero_frac={nonzero_frac:.4f} "
+        f"min={min_v:.4g} max={max_v:.4g} mean={mean_v:.4g} std={std_v:.4g}"
+    )
+
+
 def _trace_dynamic(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: float) -> dict[str, object]:
     ids = list(filter(lambda i: i is not None, map(lambda ch: kmodel.vocab.get(ch), phonemes)))
     input_ids = torch.LongTensor([[0, *ids, 0]])
@@ -298,8 +341,45 @@ def main() -> int:
     n_len = min(static_n.size, tvm_n.size, static_frames * 2)
     show("n[:2*frames_static]", static_n[:n_len], tvm_n[:n_len])
 
+    print("\nF0/N padded tail (what fills beyond valid frames?):")
+    valid_f0n = static_frames * 2
+    tvm_f0_pad = trace_tvm.get("f0_pad_summary") or _tail_summary_1d(tvm_f0, valid_f0n)
+    tvm_n_pad = trace_tvm.get("n_pad_summary") or _tail_summary_1d(tvm_n, valid_f0n)
+    static_f0_pad = _tail_summary_1d(static_f0, valid_f0n)
+    static_n_pad = _tail_summary_1d(static_n, valid_f0n)
+    print(
+        "tvm.f0 pad="
+        f"{tvm_f0_pad['pad']} finite_frac={tvm_f0_pad['finite_frac']:.3f} nonzero_frac={tvm_f0_pad['nonzero_frac']:.3f} "
+        f"head={tvm_f0_pad['head']} tail={tvm_f0_pad['tail']}"
+    )
+    print(
+        "tvm.n  pad="
+        f"{tvm_n_pad['pad']} finite_frac={tvm_n_pad['finite_frac']:.3f} nonzero_frac={tvm_n_pad['nonzero_frac']:.3f} "
+        f"head={tvm_n_pad['head']} tail={tvm_n_pad['tail']}"
+    )
+    print(
+        "pt.static f0 pad="
+        f"{static_f0_pad['pad']} finite_frac={static_f0_pad['finite_frac']:.3f} nonzero_frac={static_f0_pad['nonzero_frac']:.3f} "
+        f"head={static_f0_pad['head']} tail={static_f0_pad['tail']}"
+    )
+    print(
+        "pt.static n  pad="
+        f"{static_n_pad['pad']} finite_frac={static_n_pad['finite_frac']:.3f} nonzero_frac={static_n_pad['nonzero_frac']:.3f} "
+        f"head={static_n_pad['head']} tail={static_n_pad['tail']}"
+    )
+
     audio_static = np.asarray(trace_static["audio_trimmed"]).reshape(-1)
     audio_tvm = np.asarray(trace_tvm["audio_trimmed"]).reshape(-1)
+    print("\nDecoder audio stats:")
+    _array_stats("pt.static audio_trimmed", audio_static)
+    _array_stats("tvm audio_trimmed", audio_tvm)
+    if "decoder_input_stats" in trace_tvm:
+        stats = trace_tvm["decoder_input_stats"]
+        print("Decoder input stats (TVM pipeline):")
+        print(f"  asr: {stats['asr']}")
+        print(f"  f0:  {stats['f0']}")
+        print(f"  n:   {stats['n']}")
+        print(f"  s:   {stats['style_128']}")
     corr, lag = _best_lag_corr(audio_static, audio_tvm, max_lag=2400)
     print(f"decoder.audio_trimmed corr={corr:.4f} lag={lag} samples")
 
@@ -350,6 +430,20 @@ def main() -> int:
     show("text_encoder.t_en", np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len])
     corr2, lag2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]), audio_static, max_lag=2400)
     print(f"audio_trimmed corr={corr2:.4f} lag={lag2} samples")
+
+    print("\nDynamic PyTorch vs TVM (aligned-length F0/N):")
+    dyn_frames = int(trace_dyn["frames"])
+    tvm_frames = int(trace_tvm["frames"])
+    prefix_frames = min(dyn_frames, tvm_frames)
+    if dyn_frames != tvm_frames:
+        print(f"Warning: frames differ (dynamic={dyn_frames}, tvm={tvm_frames}); comparing prefix={prefix_frames}.")
+
+    dyn_f0 = np.asarray(trace_dyn["f0"]).reshape(-1)
+    dyn_n = np.asarray(trace_dyn["n"]).reshape(-1)
+    f_len_dyn = min(dyn_f0.size, tvm_f0.size, prefix_frames * 2)
+    n_len_dyn = min(dyn_n.size, tvm_n.size, prefix_frames * 2)
+    show("f0[:2*prefix_frames]", dyn_f0[:f_len_dyn], tvm_f0[:f_len_dyn])
+    show("n[:2*prefix_frames]", dyn_n[:n_len_dyn], tvm_n[:n_len_dyn])
 
     if args.save_dir:
         out_dir = Path(args.save_dir)
