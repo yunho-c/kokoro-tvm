@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
+import tvm
 from huggingface_hub import hf_hub_download
 from kokoro.model import KModel
 from kokoro.pipeline import KPipeline
@@ -118,6 +119,67 @@ def _array_stats(name: str, x: np.ndarray, *, atol: float = 1e-8) -> None:
         f"{name}: n={arr.size} finite_frac={finite_frac:.4f} nonzero_frac={nonzero_frac:.4f} "
         f"min={min_v:.4g} max={max_v:.4g} mean={mean_v:.4g} std={std_v:.4g}"
     )
+
+
+def _build_full_aln_from_pred_dur(pred_dur: np.ndarray, *, cur_len: int) -> tuple[torch.Tensor, int]:
+    pred = torch.as_tensor(pred_dur, dtype=torch.long).reshape(-1)
+    if pred.numel() == 0:
+        return torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32), 0
+    pred = pred[:cur_len]
+    indices = torch.repeat_interleave(torch.arange(cur_len), pred)
+    frames = int(indices.numel())
+    if frames > STATIC_AUDIO_LEN:
+        indices = indices[:STATIC_AUDIO_LEN]
+        frames = STATIC_AUDIO_LEN
+
+    pred_aln = torch.zeros((cur_len, STATIC_AUDIO_LEN), dtype=torch.float32)
+    if frames:
+        pred_aln[indices, torch.arange(frames)] = 1.0
+    full_aln = torch.zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN), dtype=torch.float32)
+    full_aln[0, :cur_len, :] = pred_aln
+    return full_aln, frames
+
+
+def _decode_pytorch(
+    kmodel: KModel,
+    *,
+    asr: np.ndarray,
+    f0: np.ndarray,
+    n: np.ndarray,
+    s128: np.ndarray,
+    frames: int,
+) -> np.ndarray:
+    with torch.no_grad():
+        asr_t = torch.as_tensor(asr, dtype=torch.float32)
+        f0_t = torch.as_tensor(f0, dtype=torch.float32)
+        n_t = torch.as_tensor(n, dtype=torch.float32)
+        s_t = torch.as_tensor(s128, dtype=torch.float32)
+        audio = kmodel.decoder(asr_t, f0_t, n_t, s_t).squeeze().cpu().numpy().astype(np.float32, copy=False)
+    target = max(0, min(int(audio.size), int(frames) * SAMPLES_PER_FRAME))
+    return audio[:target]
+
+
+def _decode_tvm(
+    pipeline: KokoroPipeline,
+    *,
+    asr: np.ndarray,
+    f0: np.ndarray,
+    n: np.ndarray,
+    s128: np.ndarray,
+    frames: int,
+) -> np.ndarray:
+    dev = pipeline.gpu_dev
+    out = pipeline._unwrap(
+        pipeline.f_decoder(
+            tvm.runtime.tensor(np.asarray(asr, dtype=np.float32), device=dev),
+            tvm.runtime.tensor(np.asarray(f0, dtype=np.float32), device=dev),
+            tvm.runtime.tensor(np.asarray(n, dtype=np.float32), device=dev),
+            tvm.runtime.tensor(np.asarray(s128, dtype=np.float32), device=dev),
+        )
+    )
+    audio = out.numpy().squeeze().astype(np.float32, copy=False)
+    target = max(0, min(int(audio.size), int(frames) * SAMPLES_PER_FRAME))
+    return audio[:target]
 
 
 def _trace_dynamic(kmodel: KModel, phonemes: str, ref_s: torch.Tensor, speed: float) -> dict[str, object]:
@@ -270,6 +332,11 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="metal", choices=["metal", "llvm", "cuda"], help="TVM device")
     parser.add_argument("--hybrid", action="store_true", help="Hybrid mode (encoder on CPU, decoder on device)")
     parser.add_argument("--save-dir", type=str, default=None, help="If set, write wavs for listening")
+    parser.add_argument(
+        "--cross-decoder",
+        action="store_true",
+        help="Run crossed decoder tests (TVM encoder -> PyTorch decoder, and PyTorch encoder -> TVM decoder)",
+    )
     args = parser.parse_args()
 
     kp = KPipeline(lang_code=args.lang, model=False)
@@ -415,6 +482,73 @@ def main() -> int:
     corr_np2, lag_np2 = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm, 2400)
     print(f"decoder.audio_trimmed corr={corr_np2:.4f} lag={lag_np2} samples")
 
+    if args.cross_decoder:
+        print("\nCrossed decoder inputs (encoder->decoder matrix):")
+
+        tvm_pred_dur = np.asarray(trace_tvm["pred_dur"]).reshape(-1)
+        tvm_full_aln, tvm_frames = _build_full_aln_from_pred_dur(tvm_pred_dur, cur_len=cur_len)
+        tvm_t_en = torch.as_tensor(np.asarray(trace_tvm["t_en"]), dtype=torch.float32)
+        asr_tvm = (tvm_t_en @ tvm_full_aln).numpy()
+
+        tvm_f0_full = np.asarray(trace_tvm["f0"])
+        tvm_n_full = np.asarray(trace_tvm["n"])
+        tvm_s128 = ref_s_tvm[:, :128].cpu().numpy().astype(np.float32, copy=False)
+
+        audio_pt_from_tvm = _decode_pytorch(
+            kmodel,
+            asr=asr_tvm,
+            f0=tvm_f0_full,
+            n=tvm_n_full,
+            s128=tvm_s128,
+            frames=tvm_frames,
+        )
+        _array_stats("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm)
+        corr_x1, lag_x1 = _best_lag_corr(audio_static, audio_pt_from_tvm, max_lag=2400)
+        print(f"pt(dec<-tvm) corr(vs pt.static)={corr_x1:.4f} lag={lag_x1} samples")
+        corr_x1b, lag_x1b = _best_lag_corr(audio_tvm, audio_pt_from_tvm, max_lag=2400)
+        print(f"pt(dec<-tvm) corr(vs tvm)={corr_x1b:.4f} lag={lag_x1b} samples")
+
+        pt_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
+        pt_full_aln, pt_frames = _build_full_aln_from_pred_dur(pt_pred_dur, cur_len=cur_len)
+        pt_t_en = torch.as_tensor(np.asarray(trace_static["t_en"]), dtype=torch.float32)
+        asr_pt = (pt_t_en @ pt_full_aln).numpy()
+        pt_f0_full = np.asarray(trace_static["f0"])
+        pt_n_full = np.asarray(trace_static["n"])
+        pt_s128 = ref_s[:, :128].cpu().numpy().astype(np.float32, copy=False)
+
+        audio_tvm_from_pt = _decode_tvm(
+            pipeline,
+            asr=asr_pt,
+            f0=pt_f0_full,
+            n=pt_n_full,
+            s128=pt_s128,
+            frames=pt_frames,
+        )
+        _array_stats("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt)
+        corr_x2, lag_x2 = _best_lag_corr(audio_static, audio_tvm_from_pt, max_lag=2400)
+        print(f"tvm(dec<-pt.static) corr(vs pt.static)={corr_x2:.4f} lag={lag_x2} samples")
+        corr_x2b, lag_x2b = _best_lag_corr(audio_tvm, audio_tvm_from_pt, max_lag=2400)
+        print(f"tvm(dec<-pt.static) corr(vs tvm)={corr_x2b:.4f} lag={lag_x2b} samples")
+
+        pt_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
+        pt_np_full_aln, pt_np_frames = _build_full_aln_from_pred_dur(pt_np_pred_dur, cur_len=cur_len)
+        pt_np_t_en = torch.as_tensor(np.asarray(trace_static_nopack["t_en"]), dtype=torch.float32)
+        asr_pt_np = (pt_np_t_en @ pt_np_full_aln).numpy()
+        pt_np_f0_full = np.asarray(trace_static_nopack["f0"])
+        pt_np_n_full = np.asarray(trace_static_nopack["n"])
+
+        audio_tvm_from_pt_np = _decode_tvm(
+            pipeline,
+            asr=asr_pt_np,
+            f0=pt_np_f0_full,
+            n=pt_np_n_full,
+            s128=pt_s128,
+            frames=pt_np_frames,
+        )
+        _array_stats("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np)
+        corr_x3, lag_x3 = _best_lag_corr(audio_static, audio_tvm_from_pt_np, max_lag=2400)
+        print(f"tvm(dec<-pt.no-pack) corr(vs pt.static)={corr_x3:.4f} lag={lag_x3} samples")
+
     print("\nDynamic PyTorch vs Static PyTorch (shape/static padding impact):")
     show(
         "bert.d_en[:cur_len]",
@@ -452,10 +586,18 @@ def main() -> int:
         sf.write(out_dir / "trace_static.wav", audio_static, 24000)
         sf.write(out_dir / "trace_static_nopack.wav", np.asarray(trace_static_nopack["audio_trimmed"]), 24000)
         sf.write(out_dir / "trace_tvm.wav", audio_tvm, 24000)
+        if args.cross_decoder:
+            sf.write(out_dir / "trace_pt_dec_from_tvm.wav", audio_pt_from_tvm, 24000)
+            sf.write(out_dir / "trace_tvm_dec_from_pt_static.wav", audio_tvm_from_pt, 24000)
+            sf.write(out_dir / "trace_tvm_dec_from_pt_nopack.wav", audio_tvm_from_pt_np, 24000)
         print(f"Wrote {out_dir / 'trace_dynamic.wav'}")
         print(f"Wrote {out_dir / 'trace_static.wav'}")
         print(f"Wrote {out_dir / 'trace_static_nopack.wav'}")
         print(f"Wrote {out_dir / 'trace_tvm.wav'}")
+        if args.cross_decoder:
+            print(f"Wrote {out_dir / 'trace_pt_dec_from_tvm.wav'}")
+            print(f"Wrote {out_dir / 'trace_tvm_dec_from_pt_static.wav'}")
+            print(f"Wrote {out_dir / 'trace_tvm_dec_from_pt_nopack.wav'}")
 
     return 0
 
