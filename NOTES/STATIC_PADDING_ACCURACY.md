@@ -93,6 +93,15 @@ This is still useful for compiler debugging, but it does not guarantee good fide
 - **Experiment C: bucketed decoder feasibility**
   - Compile a small decoder bucket (e.g. aligned length 256 or 512) and compare against `pt.dynamic` for short texts.
   - This gives a quick read on whether bucketing alone is sufficient for perceptual fidelity.
+  - Result (Metal, “Hello world”, `frames=63`):
+    - With a smaller decoder (`seq_len=256`), correlation vs `pt.dynamic` improved dramatically:
+      - `corr(tvm_256 vs pt.dynamic)≈0.77` (lag 0)
+      - `corr(pt_padded_256 vs pt.dynamic)≈0.72`
+      - `corr(tvm_256 vs pt_padded_256)≈0.83` (small lag)
+    - With the full static decoder (`seq_len=5120`), both `pt_padded_5120` and `tvm_5120` correlate poorly vs `pt.dynamic`:
+      - `corr(tvm_5120 vs pt.dynamic)≈0.008`
+      - `corr(pt_padded_5120 vs pt.dynamic)≈0.001`
+    - Interpretation: most of the “dynamic vs static” drift here is fundamentally caused by massive padding changing decoder behavior, and bucketing (reducing padding) is a practical way to recover `pt.dynamic`-like outputs without rewriting the decoder to be mask-aware.
 
 ## Notes about saving WAVs for comparison
 
