@@ -34,6 +34,7 @@ def validate_decoder_against_pytorch(
     """
     import tvm
     from kokoro.model import KModel
+    from kokoro_tvm.pipeline import SAMPLES_PER_FRAME
     from tvm import relax
 
     print("\n" + "="*60)
@@ -104,10 +105,17 @@ def validate_decoder_against_pytorch(
     actual_seq_len = asr.shape[2]
     print(f"\nActual sequence length from encoder: {actual_seq_len}")
 
-    if actual_seq_len != seq_len:
+    if actual_seq_len > seq_len:
         print(f"WARNING: Encoder produced seq_len={actual_seq_len}, but TVM compiled with seq_len={seq_len}")
-        print(f"For accurate validation, rerun with --seq-len {actual_seq_len}")
+        print("For accurate validation, recompile with a larger seq_len or use decoder bucketing.")
         return {"error": "seq_len_mismatch", "expected": seq_len, "actual": actual_seq_len}
+
+    if actual_seq_len < seq_len:
+        print(f"Info: padding decoder inputs from seq_len={actual_seq_len} to seq_len={seq_len} for validation.")
+        asr = torch.nn.functional.pad(asr, (0, seq_len - actual_seq_len))
+        pad_2x = (seq_len - actual_seq_len) * 2
+        F0_pred = torch.nn.functional.pad(F0_pred, (0, pad_2x))
+        N_pred = torch.nn.functional.pad(N_pred, (0, pad_2x))
 
     # Run PyTorch decoder
     print("\nRunning PyTorch decoder...")
@@ -156,8 +164,10 @@ def validate_decoder_against_pytorch(
     rel_error = mae / (np.mean(np.abs(pytorch_np)) + 1e-8)
 
     # Correlation
-    pytorch_flat = pytorch_np.flatten()
-    tvm_flat = tvm_result.flatten()
+    # If we padded, compare only the valid prefix portion.
+    valid_samples = int(actual_seq_len) * int(SAMPLES_PER_FRAME)
+    pytorch_flat = pytorch_np.reshape(-1)[:valid_samples]
+    tvm_flat = tvm_result.reshape(-1)[:valid_samples]
     correlation = np.corrcoef(pytorch_flat, tvm_flat)[0, 1]
 
     print("\n" + "-"*40)

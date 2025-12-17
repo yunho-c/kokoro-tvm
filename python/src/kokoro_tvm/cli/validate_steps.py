@@ -313,6 +313,18 @@ def _table_corr(corr: float, *, good_min: float = 0.7, warn_min: float = 0.2) ->
     return Text(s, style="red")
 
 
+def _parse_int_list(s: str | None) -> list[int]:
+    if not s:
+        return []
+    items: list[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        items.append(int(part))
+    return items
+
+
 def _print_summary_table(title: str, rows: list[tuple[str, str, str, str]]) -> None:
     if not rows:
         return
@@ -454,14 +466,34 @@ def _decode_tvm(
     n: np.ndarray,
     s128: np.ndarray,
     frames: int,
+    bucket_len: int | None = None,
 ) -> np.ndarray:
     dev = pipeline.gpu_dev
+    asr_np = np.asarray(asr, dtype=np.float32)
+    f0_np = np.asarray(f0, dtype=np.float32)
+    n_np = np.asarray(n, dtype=np.float32)
+    s_np = np.asarray(s128, dtype=np.float32)
+
+    if bucket_len is not None:
+        b = int(bucket_len)
+        asr_np = _pad_3d_time(asr_np, target_t=b)
+        f0_np = _pad_2d_time(f0_np, target_t=b * 2)
+        n_np = _pad_2d_time(n_np, target_t=b * 2)
+
+        fns = getattr(pipeline, "_decoder_fns", None)
+        if isinstance(fns, dict) and b in fns:
+            f_decoder = fns[b]
+        else:
+            f_decoder = pipeline.f_decoder
+    else:
+        f_decoder = pipeline.f_decoder
+
     out = pipeline._unwrap(
-        pipeline.f_decoder(
-            tvm.runtime.tensor(np.asarray(asr, dtype=np.float32), device=dev),
-            tvm.runtime.tensor(np.asarray(f0, dtype=np.float32), device=dev),
-            tvm.runtime.tensor(np.asarray(n, dtype=np.float32), device=dev),
-            tvm.runtime.tensor(np.asarray(s128, dtype=np.float32), device=dev),
+        f_decoder(
+            tvm.runtime.tensor(asr_np, device=dev),
+            tvm.runtime.tensor(f0_np, device=dev),
+            tvm.runtime.tensor(n_np, device=dev),
+            tvm.runtime.tensor(s_np, device=dev),
         )
     )
     audio = out.numpy().squeeze().astype(np.float32, copy=False)
@@ -692,6 +724,24 @@ def main() -> int:
         "--cross-decoder",
         action="store_true",
         help="Run crossed decoder tests (TVM encoder -> PyTorch decoder, and PyTorch encoder -> TVM decoder)",
+    )
+    parser.add_argument(
+        "--decoder-bucket-sweep",
+        action="store_true",
+        help="Sweep across available TVM decoder bucket lengths and report audio correlation vs references",
+    )
+    parser.add_argument(
+        "--decoder-buckets",
+        type=str,
+        default=None,
+        help="Comma-separated decoder bucket lengths to evaluate (defaults to all buckets present in lib-dir)",
+    )
+    parser.add_argument(
+        "--decoder-bucket-sweep-input",
+        type=str,
+        default="pt.dynamic",
+        choices=["pt.dynamic", "pt.static", "tvm"],
+        help="Which inputs to feed the TVM decoder during bucket sweep",
     )
     parser.add_argument(
         "--tvm-ref-s",
@@ -1179,6 +1229,138 @@ def main() -> int:
                 _array_percentiles("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn, max_samples=100_000)
             print(f"tvm(dec<-pt.dynamic) corr(vs pt.dynamic)={corr_x4:.4f} lag={lag_x4} samples")
             print(f"tvm(dec<-pt.dynamic) corr(vs pt.static)={corr_x4s:.4f} lag={lag_x4s} samples")
+
+    if args.decoder_bucket_sweep:
+        _rule("Decoder bucket sweep")
+        available = getattr(pipeline, "_decoder_bucket_lens", None)
+        if not isinstance(available, list) or not available:
+            available = [STATIC_AUDIO_LEN]
+        req = _parse_int_list(args.decoder_buckets)
+        bucket_lens = req if req else list(available)
+        bucket_lens = sorted(set(int(x) for x in bucket_lens))
+
+        if req:
+            missing = [b for b in bucket_lens if b not in available]
+            if missing:
+                print(f"Warning: requested buckets not found in lib-dir: {missing}")
+            bucket_lens = [b for b in bucket_lens if b in available]
+            if not bucket_lens:
+                print("No requested decoder buckets are available; skipping sweep.")
+                bucket_lens = []
+
+        if args.decoder_bucket_sweep_input == "pt.dynamic":
+            ref_name = "pt.dynamic"
+            ref_audio = np.asarray(trace_dyn["audio_trimmed"]).reshape(-1)
+            asr_in = asr_dyn
+            f0_in = np.asarray(trace_dyn["f0"]).astype(np.float32, copy=False)
+            n_in = np.asarray(trace_dyn["n"]).astype(np.float32, copy=False)
+            frames_in = int(frames_dyn_recon)
+            s128_in = ref_s[:, :128].cpu().numpy().astype(np.float32, copy=False)
+        elif args.decoder_bucket_sweep_input == "pt.static":
+            ref_name = "pt.static"
+            ref_audio = audio_static
+            asr_in = asr_static
+            f0_in = np.asarray(trace_static["f0"]).astype(np.float32, copy=False)
+            n_in = np.asarray(trace_static["n"]).astype(np.float32, copy=False)
+            frames_in = int(frames_static_recon)
+            s128_in = ref_s[:, :128].cpu().numpy().astype(np.float32, copy=False)
+        else:
+            ref_name = "tvm"
+            ref_audio = audio_tvm
+            asr_in = asr_tvm
+            f0_in = np.asarray(trace_tvm["f0"]).astype(np.float32, copy=False)
+            n_in = np.asarray(trace_tvm["n"]).astype(np.float32, copy=False)
+            frames_in = int(frames_tvm_recon)
+            s128_in = ref_s_tvm[:, :128].cpu().numpy().astype(np.float32, copy=False)
+
+        frames_in = max(0, min(int(frames_in), STATIC_AUDIO_LEN))
+
+        f0_in_pad = _pad_2d_time(f0_in, target_t=STATIC_AUDIO_LEN * 2)
+        n_in_pad = _pad_2d_time(n_in, target_t=STATIC_AUDIO_LEN * 2)
+        stats_by_bucket: dict[int, dict[str, float]] = {}
+        corr_rows: list[tuple[int, float, int, float, int, float, int, float, int]] = []
+
+        for b in bucket_lens:
+            b = int(b)
+            if b < frames_in:
+                print(f"bucket={b}: skipped (bucket < frames={frames_in})")
+                continue
+            try:
+                audio_b = _decode_tvm(
+                    pipeline,
+                    asr=asr_in,
+                    f0=f0_in_pad,
+                    n=n_in_pad,
+                    s128=s128_in,
+                    frames=frames_in,
+                    bucket_len=b,
+                )
+            except Exception as e:
+                print(f"bucket={b}: error: {e}")
+                continue
+
+            st = _audio_stats_1d(audio_b)
+            stats_by_bucket[b] = st
+
+            corr_ref, lag_ref = _best_lag_corr(ref_audio, audio_b, max_lag=2400)
+            corr_dyn, lag_dyn = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_b, max_lag=2400)
+            corr_static, lag_static = _best_lag_corr(audio_static, audio_b, max_lag=2400)
+            corr_tvm2, lag_tvm2 = _best_lag_corr(audio_tvm, audio_b, max_lag=2400)
+            corr_rows.append((b, corr_ref, lag_ref, corr_dyn, lag_dyn, corr_static, lag_static, corr_tvm2, lag_tvm2))
+
+            if args.save_dir:
+                out_dir = Path(args.save_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                sf.write(out_dir / f"trace_tvm_dec_bucket{b}_from_{args.decoder_bucket_sweep_input}.wav", audio_b, 24000)
+
+        if _USE_RICH:
+            stats_table = Table(title=f"Decoder bucket sweep stats (inputs={args.decoder_bucket_sweep_input})", show_lines=False)
+            stats_table.add_column("bucket", justify="right")
+            stats_table.add_column("finite", justify="right")
+            stats_table.add_column("nonzero", justify="right")
+            stats_table.add_column("max_abs", justify="right")
+            stats_table.add_column("std", justify="right")
+
+            for b, _, _, _, _, _, _, _, _ in corr_rows:
+                s = stats_by_bucket.get(int(b))
+                if s is None:
+                    continue
+                stats_table.add_row(
+                    str(b),
+                    _table_float_flag(float(s["finite_frac"]), ok_min=1.0),
+                    _table_float_flag(float(s["nonzero_frac"]), ok_min=0.0, ok_max=1.0),
+                    "nan" if not np.isfinite(s["max_abs"]) else f"{float(s['max_abs']):.3e}",
+                    "nan" if not np.isfinite(s["std"]) else f"{float(s['std']):.3e}",
+                )
+            console.print(stats_table)
+
+            corr_table = Table(title=f"Decoder bucket sweep correlations (ref={ref_name})", show_lines=False)
+            corr_table.add_column("bucket", justify="right")
+            corr_table.add_column(f"vs {ref_name}", justify="right")
+            corr_table.add_column("lag", justify="right")
+            if ref_name != "pt.dynamic":
+                corr_table.add_column("vs pt.dynamic", justify="right")
+                corr_table.add_column("lag", justify="right")
+            corr_table.add_column("vs pt.static", justify="right")
+            corr_table.add_column("lag", justify="right")
+            corr_table.add_column("vs tvm", justify="right")
+            corr_table.add_column("lag", justify="right")
+            for b, cr, lr, cd, ld, cs, ls, ct, lt in corr_rows:
+                row = [str(b), _table_corr(cr), str(lr)]
+                if ref_name != "pt.dynamic":
+                    row.extend([_table_corr(cd), str(ld)])
+                row.extend([_table_corr(cs), str(ls), _table_corr(ct), str(lt)])
+                corr_table.add_row(*row)
+            console.print(corr_table)
+        else:
+            print(f"Decoder bucket sweep (inputs={args.decoder_bucket_sweep_input} ref={ref_name})")
+            for b, cr, lr, cd, ld, cs, ls, ct, lt in corr_rows:
+                parts = [f"bucket={b}: corr(vs {ref_name})={cr:.4f} lag={lr}"]
+                if ref_name != "pt.dynamic":
+                    parts.append(f"corr(vs pt.dynamic)={cd:.4f} lag={ld}")
+                parts.append(f"corr(vs pt.static)={cs:.4f} lag={ls}")
+                parts.append(f"corr(vs tvm)={ct:.4f} lag={lt}")
+                print(" ".join(parts))
 
     _rule("Dynamic PyTorch vs Static PyTorch (shape/static padding impact)")
     _print_metrics_table(

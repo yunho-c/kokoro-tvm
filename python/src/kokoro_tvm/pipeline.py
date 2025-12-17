@@ -4,7 +4,9 @@
 """Kokoro Pipeline orchestration using TVM compiled modules."""
 
 import os
+import re
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -105,6 +107,8 @@ class KokoroPipeline:
         self.lib_dir = lib_dir
         self.hybrid = hybrid
         self.device_type = device_target.split()[0] if " " in device_target else device_target
+        self._f0n_accepts_lengths: bool | None = None
+        self._decoder_bucket_lens: list[int] = []
 
         # Set up devices
         self.cpu_dev = tvm.cpu(0)
@@ -126,8 +130,6 @@ class KokoroPipeline:
             print(f"Loading modules on {self.gpu_dev}...")
             self._load_single_device()
 
-        self._f0n_accepts_lengths: bool | None = None
-
     def _load_single_device(self):
         """Load all modules on the same device."""
         self.bert = self._load_mod("bert_compiled", self.gpu_dev, prefer_dylib=(self.device_type == "metal"))
@@ -136,13 +138,12 @@ class KokoroPipeline:
         self.text_encoder = self._load_mod(
             "text_encoder_compiled", self.gpu_dev, prefer_dylib=(self.device_type == "metal")
         )
-        self.decoder = self._load_mod("decoder_compiled", self.gpu_dev, prefer_dylib=(self.device_type == "metal"))
 
         self.f_bert = self.bert["bert_forward"]
         self.f_duration = self.duration["duration_forward"]
         self.f_f0n = self.f0n["f0n_forward"]
         self.f_text_enc = self.text_encoder["text_encoder_forward"]
-        self.f_decoder = self.decoder["decoder_forward"]
+        self._load_decoders(self.gpu_dev, prefer_dylib=(self.device_type == "metal"))
 
     def _load_hybrid(self):
         """Load encoder on CPU, decoder on GPU."""
@@ -155,13 +156,12 @@ class KokoroPipeline:
 
         # Decoder on GPU (uses .dylib for Metal)
         print(f"  Loading decoder on {self.gpu_dev}...")
-        self.decoder = self._load_mod("decoder_compiled", self.gpu_dev, prefer_dylib=(self.device_type == "metal"))
 
         self.f_bert = self.bert["bert_forward"]
         self.f_duration = self.duration["duration_forward"]
         self.f_f0n = self.f0n["f0n_forward"]
         self.f_text_enc = self.text_encoder["text_encoder_forward"]
-        self.f_decoder = self.decoder["decoder_forward"]
+        self._load_decoders(self.gpu_dev, prefer_dylib=(self.device_type == "metal"))
 
     def _load_mod(self, name: str, dev: tvm.runtime.Device, prefer_dylib: bool = False) -> tvm.runtime.Module:
         path_so = os.path.join(self.lib_dir, f"{name}.so")
@@ -179,6 +179,95 @@ class KokoroPipeline:
             print(f"    Loading {path}...")
         lib = tvm.runtime.load_module(path)
         return tvm.relax.VirtualMachine(lib, dev)
+
+    def _find_decoder_bucket_paths(self, *, prefer_dylib: bool) -> dict[int, str]:
+        lib_dir = Path(self.lib_dir)
+        if not lib_dir.exists():
+            return {}
+
+        exts = [".dylib", ".so"] if prefer_dylib else [".so", ".dylib"]
+        out: dict[int, str] = {}
+        for ext in exts:
+            for p in lib_dir.glob(f"decoder_compiled_seq*{ext}"):
+                m = re.match(rf"decoder_compiled_seq(\d+){re.escape(ext)}$", p.name)
+                if not m:
+                    continue
+                seq_len = int(m.group(1))
+                if seq_len in out:
+                    continue
+                out[seq_len] = str(p)
+        return out
+
+    def _find_decoder_default_path(self, *, prefer_dylib: bool) -> str | None:
+        lib_dir = Path(self.lib_dir)
+        exts = [".dylib", ".so"] if prefer_dylib else [".so", ".dylib"]
+        for ext in exts:
+            p = lib_dir / f"decoder_compiled{ext}"
+            if p.exists():
+                return str(p)
+        return None
+
+    def _load_decoders(self, dev: tvm.runtime.Device, *, prefer_dylib: bool) -> None:
+        """Eagerly load all available decoder buckets.
+
+        Bucketed decoders are named: decoder_compiled_seq{N}.{so,dylib}.
+        If no bucketed decoder exists, fall back to decoder_compiled.{so,dylib}.
+        """
+        self._decoder_vms: dict[int, tvm.relax.VirtualMachine] = {}
+        self._decoder_fns: dict[int, object] = {}
+
+        bucket_paths = self._find_decoder_bucket_paths(prefer_dylib=prefer_dylib)
+        if bucket_paths:
+            for seq_len, path in sorted(bucket_paths.items()):
+                if DEBUG:
+                    print(f"    Loading {path}...")
+                lib = tvm.runtime.load_module(path)
+                vm = tvm.relax.VirtualMachine(lib, dev)
+                self._decoder_vms[seq_len] = vm
+                self._decoder_fns[seq_len] = vm["decoder_forward"]
+
+            default_path = self._find_decoder_default_path(prefer_dylib=prefer_dylib)
+            if default_path is not None and STATIC_AUDIO_LEN not in self._decoder_fns:
+                if DEBUG:
+                    print(f"    Loading {default_path}...")
+                lib = tvm.runtime.load_module(default_path)
+                vm = tvm.relax.VirtualMachine(lib, dev)
+                self._decoder_vms[STATIC_AUDIO_LEN] = vm
+                self._decoder_fns[STATIC_AUDIO_LEN] = vm["decoder_forward"]
+
+            self._decoder_bucket_lens = sorted(self._decoder_fns.keys())
+            # Backward-compatible single-decoder aliases.
+            max_bucket = self._decoder_bucket_lens[-1]
+            self.decoder = self._decoder_vms[max_bucket]
+            self.f_decoder = self._decoder_fns[max_bucket]
+            print(f"Loaded {len(self._decoder_bucket_lens)} decoder bucket(s): {self._decoder_bucket_lens}")
+            return
+
+        default_path = self._find_decoder_default_path(prefer_dylib=prefer_dylib)
+        if default_path is None:
+            msg = f"Decoder module not found in {self.lib_dir} (decoder_compiled.* or decoder_compiled_seq*.*)"
+            raise FileNotFoundError(msg)
+        if DEBUG:
+            print(f"    Loading {default_path}...")
+        lib = tvm.runtime.load_module(default_path)
+        vm = tvm.relax.VirtualMachine(lib, dev)
+        self._decoder_vms[STATIC_AUDIO_LEN] = vm
+        self._decoder_fns[STATIC_AUDIO_LEN] = vm["decoder_forward"]
+        self._decoder_bucket_lens = [STATIC_AUDIO_LEN]
+        self.decoder = vm
+        self.f_decoder = vm["decoder_forward"]
+
+    def _select_decoder_bucket(self, frames: int) -> int:
+        frames = int(frames)
+        if not self._decoder_bucket_lens:
+            return STATIC_AUDIO_LEN
+        if frames <= 0:
+            return self._decoder_bucket_lens[0]
+        for b in self._decoder_bucket_lens:
+            if b >= frames:
+                return b
+        msg = f"Decoder bucket too small for frames={frames}; max_bucket={self._decoder_bucket_lens[-1]}."
+        raise ValueError(msg)
 
     def _unwrap(self, obj):
         """Extract NDArray from VM output (handles tuples, lists, Arrays)."""
@@ -341,26 +430,24 @@ class KokoroPipeline:
         # Decoder: asr, F0, N, style[:128] -> audio
         t6 = time.time()
         self._debug("Running Decoder (GPU)..." if self.hybrid else "Running Decoder...")
+        bucket_len = self._select_decoder_bucket(actual_audio_len)
+        if bucket_len != STATIC_AUDIO_LEN:
+            self._debug(f"Decoder bucket selected: {bucket_len} (frames={actual_audio_len})")
 
-        # In hybrid mode, transfer data to GPU
-        if self.hybrid:
-            f0_np = f0_tvm.numpy()
-            n_np = n_tvm.numpy() if n_tvm is not None else None
-            decoder_inputs = [
-                tvm.runtime.tensor(asr.numpy(), device=dec_dev),
-                tvm.runtime.tensor(f0_np, device=dec_dev),
-                tvm.runtime.tensor(n_np, device=dec_dev) if n_np is not None else n_tvm,
-                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
-            ]
-        else:
-            decoder_inputs = [
-                tvm.runtime.tensor(asr.numpy(), device=dec_dev),
-                tvm.runtime.tensor(f0_tvm.numpy(), device=dec_dev),
-                tvm.runtime.tensor(n_tvm.numpy(), device=dec_dev) if n_tvm is not None else n_tvm,
-                tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
-            ]
+        asr_np = asr.numpy()[:, :, :bucket_len]
+        f0_np = f0_tvm.numpy()[:, : bucket_len * 2]
+        n_np = n_tvm.numpy()[:, : bucket_len * 2] if n_tvm is not None else None
+        s128_np = ref_s[:, :128].numpy()
 
-        audio_tvm = self._unwrap(self.f_decoder(*decoder_inputs))
+        f_decoder = self._decoder_fns[bucket_len]
+        decoder_inputs = [
+            tvm.runtime.tensor(asr_np, device=dec_dev),
+            tvm.runtime.tensor(f0_np, device=dec_dev),
+            tvm.runtime.tensor(n_np, device=dec_dev) if n_np is not None else n_tvm,
+            tvm.runtime.tensor(s128_np, device=dec_dev),
+        ]
+
+        audio_tvm = self._unwrap(f_decoder(*decoder_inputs))
         audio = torch.from_numpy(audio_tvm.numpy())
         self._debug("Decoder done", t6)
 
@@ -486,14 +573,23 @@ class KokoroPipeline:
             "n": _stats_summary(n_np) if n_np is not None else None,
             "style_128": _stats_summary(ref_s[:, :128].numpy()),
         }
+        bucket_len = self._select_decoder_bucket(actual_audio_len)
+        out["decoder_bucket_len"] = int(bucket_len)
+
+        asr_np = asr.numpy()[:, :, :bucket_len]
+        f0_np_b = f0_np[:, : bucket_len * 2]
+        n_np_b = n_np[:, : bucket_len * 2] if n_np is not None else None
+        s128_np = ref_s[:, :128].numpy()
+
         decoder_inputs = [
-            tvm.runtime.tensor(asr.numpy(), device=dec_dev),
-            tvm.runtime.tensor(f0_tvm.numpy(), device=dec_dev),
-            tvm.runtime.tensor(n_tvm.numpy(), device=dec_dev) if n_tvm is not None else n_tvm,
-            tvm.runtime.tensor(ref_s[:, :128].numpy(), device=dec_dev),
+            tvm.runtime.tensor(asr_np, device=dec_dev),
+            tvm.runtime.tensor(f0_np_b, device=dec_dev),
+            tvm.runtime.tensor(n_np_b, device=dec_dev) if n_np_b is not None else n_tvm,
+            tvm.runtime.tensor(s128_np, device=dec_dev),
         ]
 
-        audio_tvm = self._unwrap(self.f_decoder(*decoder_inputs))
+        f_decoder = self._decoder_fns[bucket_len]
+        audio_tvm = self._unwrap(f_decoder(*decoder_inputs))
         audio_full = audio_tvm.numpy().squeeze()
         target_samples = min(int(audio_full.size), int(actual_audio_len) * SAMPLES_PER_FRAME)
         out["audio_trimmed"] = audio_full[:target_samples]

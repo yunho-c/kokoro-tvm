@@ -6,6 +6,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 
 import torch
 import tvm
@@ -20,10 +21,20 @@ from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Compile Kokoro Decoder to TVM with static shapes")
-    parser.add_argument("--seq-len", type=int, default=150,
-                        help="Static sequence length for compilation (default: 150)")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output path for compiled library (default: decoder_compiled.<ext>)")
+    parser.add_argument("--seq-len", type=int, default=150, help="Static sequence length for compilation (default: 150)")
+    parser.add_argument(
+        "--seq-lens",
+        type=str,
+        default=None,
+        help="Comma-separated list of bucket lengths to compile (e.g. 256,512,1024). If set, compiles all buckets.",
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output path for compiled library (single build only)")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory for compiled outputs (used for multi-bucket builds).",
+    )
     parser.add_argument("--target", type=str, default="llvm",
                         choices=list(TARGET_CONFIGS.keys()),
                         help=f"Compilation target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)")
@@ -33,6 +44,11 @@ def main():
                         help="Skip loading pretrained weights (use random weights for faster iteration)")
     parser.add_argument("--validate", action="store_true",
                         help="Validate TVM output against PyTorch using real encoder data")
+    parser.add_argument(
+        "--dump-ir",
+        action="store_true",
+        help="Dump intermediate decoder IR (before_opt/decomposed/legalized). Off by default.",
+    )
     parser.add_argument("--no-dlight", action="store_true",
                         help="Skip DLight GPU scheduling (useful to debug numerical issues on Metal)")
     parser.add_argument("--no-fuse", action="store_true",
@@ -57,9 +73,14 @@ def main():
     # Resolve target
     target, target_host, ext, desc = resolve_target(args.target)
 
-    # Set default output path based on target extension
-    if args.output is None:
-        args.output = f"decoder_compiled{ext}"
+    seq_lens: list[int]
+    if args.seq_lens:
+        seq_lens = [int(x) for x in args.seq_lens.split(",") if x.strip()]
+    else:
+        seq_lens = [int(args.seq_len)]
+    if not seq_lens:
+        raise ValueError("No --seq-len/--seq-lens provided.")
+    seq_lens = sorted(set(seq_lens))
 
     print(f"Target: {desc}")
 
@@ -67,8 +88,21 @@ def main():
     apply_sinegen_patch()
     apply_adain_patch()
 
-    # Compile decoder
-    compile_decoder(args, target)
+    output_dir = Path(args.output_dir) if args.output_dir else Path(".")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if len(seq_lens) == 1:
+        seq_len = seq_lens[0]
+        if args.output is None:
+            args.output = str(output_dir / f"decoder_compiled{ext}")
+        compile_decoder(args, target, seq_len=seq_len, output_path=args.output, dump_ir=args.dump_ir)
+    else:
+        if args.output is not None:
+            raise ValueError("Use --output-dir for multi-bucket builds; --output only supports single build.")
+        for seq_len in seq_lens:
+            out_path = str(output_dir / f"decoder_compiled_seq{seq_len}{ext}")
+            print(f"\n=== Compiling decoder bucket seq_len={seq_len} -> {out_path} ===")
+            compile_decoder(args, target, seq_len=seq_len, output_path=out_path, dump_ir=args.dump_ir)
 
     # Run validation if requested
     if args.validate:
@@ -76,32 +110,41 @@ def main():
         is_macos_host = platform.system() == "Darwin"
 
         # Validation supported for: LLVM (CPU) or metal-macos on macOS host
-        if args.target == "llvm":
-            from kokoro_tvm.validation import validate_decoder_against_pytorch
-            validate_decoder_against_pytorch(args.output, args.seq_len)
-        elif args.target == "metal-macos" and is_macos_host:
-            from kokoro_tvm.validation import validate_decoder_against_pytorch
-            validate_decoder_against_pytorch(args.output, args.seq_len, device="metal")
-        else:
+        from kokoro_tvm.validation import validate_decoder_against_pytorch
+
+        device = "metal" if args.target == "metal-macos" and is_macos_host else "cpu"
+        if args.target != "llvm" and not (args.target == "metal-macos" and is_macos_host):
             print(f"Warning: Validation is not supported for target '{args.target}' on this platform. Skipping.")
+            return
+
+        for seq_len in seq_lens:
+            lib_path = (
+                args.output
+                if len(seq_lens) == 1
+                else str(output_dir / f"decoder_compiled_seq{seq_len}{ext}")
+            )
+            validate_decoder_against_pytorch(lib_path, seq_len, device=device)
 
 
-def compile_decoder(args, target):
+def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bool):
     """Compile the Decoder module to TVM.
 
     Args:
         args: CLI arguments
         target: TVM target object
+        seq_len: Static decoder length for this build
+        output_path: Output library path (.so/.dylib)
+        dump_ir: Whether to dump intermediate IR scripts
     """
     from kokoro_tvm.models import create_decoder_module
     from kokoro_tvm.models.decoder import get_decoder_config
 
     # Create Relax module using shared function
     mod = create_decoder_module(
-        seq_len=args.seq_len,
+        seq_len=seq_len,
         load_weights=not args.no_weights,
         func_name="decoder_forward",
-        dump_ir="decoder_before_opt.py",
+        dump_ir=(f"decoder_before_opt_seq{seq_len}.py" if dump_ir else None),
     )
 
     # Get config for verification later
@@ -116,15 +159,19 @@ def compile_decoder(args, target):
     with target:
         print("Running DecomposeOpsForInference...")
         mod = relax.transform.DecomposeOpsForInference()(mod)
-        with open("decoder_decomposed.py", "w") as f:
-            f.write(mod.script())
-        print("Dumped decoder_decomposed.py")
+        if dump_ir:
+            path = f"decoder_decomposed_seq{seq_len}.py"
+            with open(path, "w") as f:
+                f.write(mod.script())
+            print(f"Dumped {path}")
 
         print("Running LegalizeOps...")
         mod = relax.transform.LegalizeOps()(mod)
-        with open("decoder_legalized.py", "w") as f:
-            f.write(mod.script())
-        print("Dumped decoder_legalized.py")
+        if dump_ir:
+            path = f"decoder_legalized_seq{seq_len}.py"
+            with open(path, "w") as f:
+                f.write(mod.script())
+            print(f"Dumped {path}")
 
         # Auto-tune with MetaSchedule if requested
         if args.tune:
@@ -196,7 +243,6 @@ def compile_decoder(args, target):
     print("Compilation successful!")
 
     # Save compiled library
-    output_path = args.output
     ex.export_library(output_path)
     print(f"Saved compiled library to: {output_path}")
 
@@ -234,7 +280,7 @@ def compile_decoder(args, target):
 
     vm = relax.VirtualMachine(ex, dev)
 
-    test_len = args.seq_len
+    test_len = int(seq_len)
     asr_in = torch.randn(1, hidden_dim, test_len).numpy()
     f0_in = torch.randn(1, test_len * 2).numpy()
     n_in = torch.randn(1, test_len * 2).numpy()
