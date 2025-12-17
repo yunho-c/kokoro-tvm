@@ -34,6 +34,7 @@ try:
     from rich.console import Console
     from rich.pretty import Pretty
     from rich.table import Table
+    from rich.text import Text
 
     _RICH_AVAILABLE = True
     console = Console()
@@ -67,6 +68,19 @@ def _fmt_sci(x: float) -> str:
     return f"{x:.3e}"
 
 
+def _err_text(x: float, *, green_max: float = 1e-3, yellow_max: float = 1.0) -> object:
+    if not np.isfinite(x):
+        return Text("nan", style="red") if _USE_RICH else "nan"
+    s = f"{float(x):.3e}"
+    if not _USE_RICH:
+        return s
+    if x < green_max:
+        return Text(s, style="green")
+    if x < yellow_max:
+        return Text(s, style="yellow")
+    return Text(s, style="red")
+
+
 def _print_metrics_table(title: str, rows: list[tuple[str, dict[str, float]]]) -> None:
     if not rows:
         return
@@ -77,7 +91,7 @@ def _print_metrics_table(title: str, rows: list[tuple[str, dict[str, float]]]) -
         table.add_column("max_abs", justify="right")
         table.add_column("rmse", justify="right")
         for name, m in rows:
-            table.add_row(name, _fmt_sci(m["mae"]), _fmt_sci(m["max_abs"]), _fmt_sci(m["rmse"]))
+            table.add_row(name, _err_text(m["mae"]), _err_text(m["max_abs"]), _err_text(m["rmse"]))
         console.print(table)
         return
 
@@ -222,6 +236,40 @@ def _summary_stats_1d(x: np.ndarray) -> dict[str, float]:
     return {"n": float(arr.size), "finite_frac": finite_frac, "max_abs": max_abs, "std": std}
 
 
+def _audio_stats_1d(x: np.ndarray, *, atol: float = 1e-8) -> dict[str, float]:
+    arr = np.asarray(x).reshape(-1).astype(np.float32, copy=False)
+    if arr.size == 0:
+        return {
+            "n": 0.0,
+            "finite_frac": 1.0,
+            "nonzero_frac": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+            "max_abs": 0.0,
+        }
+    finite = np.isfinite(arr)
+    finite_frac = float(np.mean(finite))
+    arr_f = arr[finite] if np.any(finite) else np.array([], dtype=np.float32)
+    min_v = float(np.min(arr_f)) if arr_f.size else float("nan")
+    max_v = float(np.max(arr_f)) if arr_f.size else float("nan")
+    mean_v = float(np.mean(arr_f)) if arr_f.size else float("nan")
+    std_v = float(np.std(arr_f)) if arr_f.size else float("nan")
+    max_abs = float(np.max(np.abs(arr_f))) if arr_f.size else float("nan")
+    nonzero_frac = float(np.mean(np.abs(arr) > float(atol)))
+    return {
+        "n": float(arr.size),
+        "finite_frac": finite_frac,
+        "nonzero_frac": nonzero_frac,
+        "min": min_v,
+        "max": max_v,
+        "mean": mean_v,
+        "std": std_v,
+        "max_abs": max_abs,
+    }
+
+
 def _fmt_bool_flag(ok: bool, text: str) -> str:
     if _USE_RICH:
         return f"[green]{text}[/green]" if ok else f"[red]{text}[/red]"
@@ -236,6 +284,33 @@ def _fmt_float_flag(value: float, *, ok_min: float | None = None, ok_max: float 
         ok = ok and (value <= ok_max)
     s = "nan" if not np.isfinite(value) else fmt.format(value)
     return _fmt_bool_flag(ok, s)
+
+
+def _table_float_flag(
+    value: float, *, ok_min: float | None = None, ok_max: float | None = None, fmt: str = "{:.3f}"
+) -> object:
+    ok = True
+    if ok_min is not None:
+        ok = ok and (value >= ok_min)
+    if ok_max is not None:
+        ok = ok and (value <= ok_max)
+    s = "nan" if not np.isfinite(value) else fmt.format(float(value))
+    if not _USE_RICH:
+        return s if ok else f"!! {s}"
+    return Text(s, style="green" if ok else "red")
+
+
+def _table_corr(corr: float, *, good_min: float = 0.7, warn_min: float = 0.2) -> object:
+    if not np.isfinite(corr):
+        return Text("nan", style="red") if _USE_RICH else "nan"
+    s = f"{float(corr):.4f}"
+    if not _USE_RICH:
+        return s
+    if corr >= good_min:
+        return Text(s, style="green")
+    if corr >= warn_min:
+        return Text(s, style="yellow")
+    return Text(s, style="red")
 
 
 def _print_summary_table(title: str, rows: list[tuple[str, str, str, str]]) -> None:
@@ -940,15 +1015,9 @@ def main() -> int:
             s128=tvm_s128,
             frames=tvm_frames,
         )
-        _array_stats("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm)
-        if args.verbose:
-            _array_percentiles("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm, max_samples=100_000)
         corr_x1, lag_x1 = _best_lag_corr(audio_static, audio_pt_from_tvm, max_lag=2400)
-        print(f"pt(dec<-tvm) corr(vs pt.static)={corr_x1:.4f} lag={lag_x1} samples")
         corr_x1d, lag_x1d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_pt_from_tvm, max_lag=2400)
-        print(f"pt(dec<-tvm) corr(vs pt.dynamic)={corr_x1d:.4f} lag={lag_x1d} samples")
         corr_x1b, lag_x1b = _best_lag_corr(audio_tvm, audio_pt_from_tvm, max_lag=2400)
-        print(f"pt(dec<-tvm) corr(vs tvm)={corr_x1b:.4f} lag={lag_x1b} samples")
 
         pt_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
         pt_full_aln, pt_frames = _build_full_aln_from_pred_dur(pt_pred_dur, cur_len=cur_len)
@@ -966,15 +1035,9 @@ def main() -> int:
             s128=pt_s128,
             frames=pt_frames,
         )
-        _array_stats("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt)
-        if args.verbose:
-            _array_percentiles("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt, max_samples=100_000)
         corr_x2, lag_x2 = _best_lag_corr(audio_static, audio_tvm_from_pt, max_lag=2400)
-        print(f"tvm(dec<-pt.static) corr(vs pt.static)={corr_x2:.4f} lag={lag_x2} samples")
         corr_x2b2, lag_x2b2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt, max_lag=2400)
-        print(f"tvm(dec<-pt.static) corr(vs pt.dynamic)={corr_x2b2:.4f} lag={lag_x2b2} samples")
         corr_x2b, lag_x2b = _best_lag_corr(audio_tvm, audio_tvm_from_pt, max_lag=2400)
-        print(f"tvm(dec<-pt.static) corr(vs tvm)={corr_x2b:.4f} lag={lag_x2b} samples")
 
         pt_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
         pt_np_full_aln, pt_np_frames = _build_full_aln_from_pred_dur(pt_np_pred_dur, cur_len=cur_len)
@@ -991,13 +1054,10 @@ def main() -> int:
             s128=pt_s128,
             frames=pt_np_frames,
         )
-        _array_stats("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np)
-        if args.verbose:
-            _array_percentiles("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np, max_samples=100_000)
         corr_x3, lag_x3 = _best_lag_corr(audio_static, audio_tvm_from_pt_np, max_lag=2400)
-        print(f"tvm(dec<-pt.no-pack) corr(vs pt.static)={corr_x3:.4f} lag={lag_x3} samples")
         corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
-        print(f"tvm(dec<-pt.no-pack) corr(vs pt.no-pack)={corr_x3b:.4f} lag={lag_x3b} samples")
+        corr_x3d, lag_x3d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
+        corr_x3t, lag_x3t = _best_lag_corr(audio_tvm, audio_tvm_from_pt_np, max_lag=2400)
 
         asr_dyn_pad = _pad_3d_time(asr_dyn, target_t=STATIC_AUDIO_LEN)
         f0_dyn_pad = _pad_2d_time(dyn_f0_full, target_t=STATIC_AUDIO_LEN * 2)
@@ -1011,13 +1071,114 @@ def main() -> int:
             s128=pt_s128,
             frames=frames_dyn_clamped,
         )
-        _array_stats("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn)
-        if args.verbose:
-            _array_percentiles("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn, max_samples=100_000)
         corr_x4, lag_x4 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_dyn, max_lag=2400)
-        print(f"tvm(dec<-pt.dynamic) corr(vs pt.dynamic)={corr_x4:.4f} lag={lag_x4} samples")
         corr_x4s, lag_x4s = _best_lag_corr(audio_static, audio_tvm_from_dyn, max_lag=2400)
-        print(f"tvm(dec<-pt.dynamic) corr(vs pt.static)={corr_x4s:.4f} lag={lag_x4s} samples")
+        corr_x4t, lag_x4t = _best_lag_corr(audio_tvm, audio_tvm_from_dyn, max_lag=2400)
+
+        if _USE_RICH:
+            stats_table = Table(title="Crossed decoder: audio stats", show_lines=False)
+            stats_table.add_column("case", overflow="fold")
+            stats_table.add_column("frames", justify="right")
+            stats_table.add_column("finite", justify="right")
+            stats_table.add_column("nonzero", justify="right")
+            stats_table.add_column("max_abs", justify="right")
+            stats_table.add_column("std", justify="right")
+
+            corr_table = Table(title="Crossed decoder: correlations", show_lines=False)
+            corr_table.add_column("case", overflow="fold")
+            corr_table.add_column("vs pt.dynamic", justify="right")
+            corr_table.add_column("lag", justify="right")
+            corr_table.add_column("vs pt.static", justify="right")
+            corr_table.add_column("lag", justify="right")
+            corr_table.add_column("vs tvm", justify="right")
+            corr_table.add_column("lag", justify="right")
+            corr_table.add_column("vs pt.no-pack", justify="right")
+            corr_table.add_column("lag", justify="right")
+
+            cases = [
+                ("pt(dec<-tvm)", audio_pt_from_tvm, int(tvm_frames), (corr_x1d, lag_x1d), (corr_x1, lag_x1), (corr_x1b, lag_x1b), (0.0, 0)),
+                (
+                    "tvm(dec<-pt.static)",
+                    audio_tvm_from_pt,
+                    int(pt_frames),
+                    (corr_x2b2, lag_x2b2),
+                    (corr_x2, lag_x2),
+                    (corr_x2b, lag_x2b),
+                    (0.0, 0),
+                ),
+                (
+                    "tvm(dec<-pt.no-pack)",
+                    audio_tvm_from_pt_np,
+                    int(pt_np_frames),
+                    (corr_x3d, lag_x3d),
+                    (corr_x3, lag_x3),
+                    (corr_x3t, lag_x3t),
+                    (corr_x3b, lag_x3b),
+                ),
+                (
+                    "tvm(dec<-pt.dynamic)",
+                    audio_tvm_from_dyn,
+                    int(frames_dyn_clamped),
+                    (corr_x4, lag_x4),
+                    (corr_x4s, lag_x4s),
+                    (corr_x4t, lag_x4t),
+                    (0.0, 0),
+                ),
+            ]
+
+            def _fmt_sci_or_nan(v: float) -> str:
+                return "nan" if not np.isfinite(v) else f"{float(v):.3e}"
+
+            for name, audio_case, frames_case, (cd, ld), (cs, ls), (ct, lt), (cnp, lnp) in cases:
+                st = _audio_stats_1d(audio_case)
+                stats_table.add_row(
+                    name,
+                    str(frames_case),
+                    _table_float_flag(st["finite_frac"], ok_min=1.0),
+                    _table_float_flag(st["nonzero_frac"], ok_min=0.0, ok_max=1.0),
+                    _fmt_sci_or_nan(st["max_abs"]),
+                    _fmt_sci_or_nan(st["std"]),
+                )
+                corr_table.add_row(
+                    name,
+                    _table_corr(cd),
+                    str(int(ld)),
+                    _table_corr(cs),
+                    str(int(ls)),
+                    _table_corr(ct),
+                    str(int(lt)),
+                    _table_corr(cnp) if name == "tvm(dec<-pt.no-pack)" else "-",
+                    str(int(lnp)) if name == "tvm(dec<-pt.no-pack)" else "-",
+                )
+
+            console.print(stats_table)
+            console.print(corr_table)
+        else:
+            _array_stats("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm)
+            if args.verbose:
+                _array_percentiles("pt(dec<-tvm).audio_trimmed", audio_pt_from_tvm, max_samples=100_000)
+            print(f"pt(dec<-tvm) corr(vs pt.static)={corr_x1:.4f} lag={lag_x1} samples")
+            print(f"pt(dec<-tvm) corr(vs pt.dynamic)={corr_x1d:.4f} lag={lag_x1d} samples")
+            print(f"pt(dec<-tvm) corr(vs tvm)={corr_x1b:.4f} lag={lag_x1b} samples")
+
+            _array_stats("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt)
+            if args.verbose:
+                _array_percentiles("tvm(dec<-pt.static).audio_trimmed", audio_tvm_from_pt, max_samples=100_000)
+            print(f"tvm(dec<-pt.static) corr(vs pt.static)={corr_x2:.4f} lag={lag_x2} samples")
+            print(f"tvm(dec<-pt.static) corr(vs pt.dynamic)={corr_x2b2:.4f} lag={lag_x2b2} samples")
+            print(f"tvm(dec<-pt.static) corr(vs tvm)={corr_x2b:.4f} lag={lag_x2b} samples")
+
+            _array_stats("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np)
+            if args.verbose:
+                _array_percentiles("tvm(dec<-pt.no-pack).audio_trimmed", audio_tvm_from_pt_np, max_samples=100_000)
+            print(f"tvm(dec<-pt.no-pack) corr(vs pt.static)={corr_x3:.4f} lag={lag_x3} samples")
+            print(f"tvm(dec<-pt.no-pack) corr(vs pt.no-pack)={corr_x3b:.4f} lag={lag_x3b} samples")
+
+            _array_stats("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn)
+            if args.verbose:
+                _array_percentiles("tvm(dec<-pt.dynamic).audio_trimmed", audio_tvm_from_dyn, max_samples=100_000)
+            print(f"tvm(dec<-pt.dynamic) corr(vs pt.dynamic)={corr_x4:.4f} lag={lag_x4} samples")
+            print(f"tvm(dec<-pt.dynamic) corr(vs pt.static)={corr_x4s:.4f} lag={lag_x4s} samples")
 
     _rule("Dynamic PyTorch vs Static PyTorch (shape/static padding impact)")
     _print_metrics_table(

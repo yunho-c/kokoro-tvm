@@ -80,9 +80,13 @@ This is still useful for compiler debugging, but it does not guarantee good fide
 
 ## Recommended next experiments
 
-- **Experiment A: prefix-only `F0N` in the PyTorch static reference**
-  - Modify the `pt.static` trace path so `F0N` runs on `en[..., :frames]` and then pads outputs.
-  - Re-run `validate_steps.py` to see if `pt.dynamic vs pt.static` (F0/N prefix) collapses to ~1e-2 scale.
+- **Experiment A: prefix-only `F0N` in the PyTorch static reference (completed)**
+  - Change: in `validate_steps.py`, `pt.static` now runs `F0Ntrain` on `en_prefix` with shape `[B, 640, frames]` (the reconstructed valid aligned length) and then pads `f0/n` back to `STATIC_AUDIO_LEN * 2`.
+  - Result: this removed the huge `pt.dynamic vs pt.static` discrepancy in `f0/n`:
+    - `dynamic vs static (F0/N prefix)` dropped from O(1e2) error to ~`1e-5` for `f0` and ~`1e-6` for `n`.
+    - `pt.static vs tvm` `f0/n` prefix fidelity became small (e.g. `f0 mae≈9e-3`, `n mae≈2e-3`), matching the already-good `pt.dynamic vs tvm` prefix comparison.
+  - Interpretation: the earlier “static vs dynamic” `f0/n` mismatch was largely an artifact of computing `F0N` over a massively padded aligned axis in `pt.static`, not a fundamental TVM inaccuracy.
+  - What did not change: the end-to-end TVM pipeline audio is still badly scaled (e.g. `max_abs≈1e9`) and correlates poorly vs PyTorch, which points to the decoder remaining padding-/normalization-sensitive issue.
 - **Experiment B: isolate decoder padding sensitivity**
   - Feed the same decoder inputs but vary only the padded tail (e.g. pad with zeros vs pad with repeated last value) and see how much the prefix audio changes.
   - If prefix audio changes significantly, the decoder is computing timewise stats that are padding-sensitive.
@@ -93,4 +97,3 @@ This is still useful for compiler debugging, but it does not guarantee good fide
 ## Notes about saving WAVs for comparison
 
 If debug traces are written as `PCM_16` WAV, clipping can make different raw waveforms look/sound artificially similar. Prefer saving as float WAV (`subtype="FLOAT"`) or normalize with headroom before writing for meaningful listening tests.
-
