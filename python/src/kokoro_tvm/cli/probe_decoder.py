@@ -45,7 +45,9 @@ def _print_probe(probe: np.ndarray) -> None:
         row_f = row[finite] if np.any(finite) else np.array([], dtype=np.float32)
         min_v = float(np.min(row_f)) if row_f.size else float("nan")
         max_v = float(np.max(row_f)) if row_f.size else float("nan")
-        print(f"{name}: n={row.size} finite_frac={finite_frac:.3f} min={min_v:.6g} max={max_v:.6g} head={row[:8].tolist()}")
+        print(
+            f"{name}: n={row.size} finite_frac={finite_frac:.3f} min={min_v:.6g} max={max_v:.6g} head={row[:8].tolist()}"
+        )
 
 
 def main() -> int:
