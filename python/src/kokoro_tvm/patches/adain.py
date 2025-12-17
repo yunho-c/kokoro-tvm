@@ -48,4 +48,3 @@ def apply_adain_patch() -> None:
         AdaIN1d.forward = _adain1d_forward_stable
 
     _patched = True
-

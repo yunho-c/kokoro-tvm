@@ -26,7 +26,7 @@ from kokoro_tvm.patches.lstm import apply_lstm_patch
 
 def compile_kokoro(model, output_dir: str):
     """Compile Kokoro model to TVM Relax IR.
-    
+
     Args:
         model: KModelForONNX instance
         output_dir: Directory to save compiled artifacts
@@ -60,9 +60,7 @@ def compile_kokoro(model, output_dir: str):
     # Export the program
     with sdpa_kernel(SDPBackend.MATH):
         exported_program = torch.export.export(
-            model,
-            (dummy_input_ids, dummy_style, dummy_speed),
-            dynamic_shapes=dynamic_shapes
+            model, (dummy_input_ids, dummy_style, dummy_speed), dynamic_shapes=dynamic_shapes
         )
 
     print("Importing to TVM Relax...")
@@ -70,13 +68,15 @@ def compile_kokoro(model, output_dir: str):
 
     # Basic optimization pipeline
     print("Applying optimizations...")
-    seq = tvm.transform.Sequential([
-        relax.transform.LegalizeOps(),
-        relax.transform.AnnotateTIROpPattern(),
-        relax.transform.FoldConstant(),
-        relax.transform.DeadCodeElimination(),
-        relax.transform.CanonicalizeBindings(),
-    ])
+    seq = tvm.transform.Sequential(
+        [
+            relax.transform.LegalizeOps(),
+            relax.transform.AnnotateTIROpPattern(),
+            relax.transform.FoldConstant(),
+            relax.transform.DeadCodeElimination(),
+            relax.transform.CanonicalizeBindings(),
+        ]
+    )
 
     mod = seq(mod)
 
@@ -94,18 +94,9 @@ def compile_kokoro(model, output_dir: str):
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser("Compile Kokoro Model to TVM Relax", add_help=True)
-    parser.add_argument(
-        "--config_file", "-c", type=str, required=False,
-        help="path to config file"
-    )
-    parser.add_argument(
-        "--checkpoint_path", "-p", type=str, required=False,
-        help="path to checkpoint file"
-    )
-    parser.add_argument(
-        "--output_dir", "-o", type=str, default="tvm_output",
-        help="output directory"
-    )
+    parser.add_argument("--config_file", "-c", type=str, required=False, help="path to config file")
+    parser.add_argument("--checkpoint_path", "-p", type=str, required=False, help="path to checkpoint file")
+    parser.add_argument("--output_dir", "-o", type=str, default="tvm_output", help="output directory")
 
     args = parser.parse_args()
 
@@ -118,6 +109,7 @@ def main():
 
     if not config or not checkpoint:
         from huggingface_hub import hf_hub_download
+
         repo_id = "hexgrad/Kokoro-82M"
         if not config:
             print(f"Downloading config from {repo_id}...")

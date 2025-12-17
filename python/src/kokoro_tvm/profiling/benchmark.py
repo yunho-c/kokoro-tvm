@@ -62,14 +62,14 @@ def benchmark_inference(
     repeat: int = 20,
 ) -> BenchmarkResult:
     """Benchmark a single function in the VM.
-    
+
     Args:
         vm: Relax VirtualMachine instance
         func_name: Name of the function to benchmark
         inputs: List of input NDArrays
         warmup: Number of warmup runs
         repeat: Number of timed runs
-        
+
     Returns:
         BenchmarkResult with timing statistics
     """
@@ -116,9 +116,9 @@ def benchmark_module(
     repeat: int = 20,
 ) -> BenchmarkResult:
     """Benchmark a compiled TVM module.
-    
+
     Loads the module and runs inference benchmarks with synthetic inputs.
-    
+
     Args:
         lib_path: Path to compiled .so/.dylib file
         target: Target string for device selection
@@ -128,7 +128,7 @@ def benchmark_module(
         style_dim: Style dimension
         warmup: Number of warmup runs
         repeat: Number of timed runs
-        
+
     Returns:
         BenchmarkResult with timing statistics
     """
@@ -155,14 +155,14 @@ def create_benchmark_report(
     output_path: Optional[Union[str, Path]] = None,
 ) -> dict:
     """Create a comprehensive benchmark report.
-    
+
     Args:
         lib_path: Path to the benchmarked module
         result: Benchmark results
         target: Target used
         seq_len: Sequence length used
         output_path: Optional path to save JSON report
-        
+
     Returns:
         Report dictionary
     """
@@ -194,11 +194,11 @@ def compare_results(
     optimized: BenchmarkResult,
 ) -> dict:
     """Compare two benchmark results.
-    
+
     Args:
         baseline: Result before optimization
         optimized: Result after optimization
-        
+
     Returns:
         Comparison dictionary with speedup metrics
     """

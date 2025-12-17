@@ -284,7 +284,9 @@ class KokoroPipeline:
         """
         if self._f0n_accepts_lengths is None:
             try:
-                out = self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev))
+                out = self.f_f0n(
+                    en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev)
+                )
                 self._f0n_accepts_lengths = True
                 return out
             except tvm.error.TVMError as e:
@@ -299,7 +301,9 @@ class KokoroPipeline:
                     raise
 
         if self._f0n_accepts_lengths:
-            return self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev))
+            return self.f_f0n(
+                en, tvm.runtime.tensor(s, device=enc_dev), tvm.runtime.tensor(frame_lengths, device=enc_dev)
+            )
         return self.f_f0n(en, tvm.runtime.tensor(s, device=enc_dev))
 
     def _debug(self, msg: str, start_time: float = None):

@@ -13,7 +13,7 @@ from torch import nn
 
 def apply_lstm_patch():
     """Apply mokeypatch to torch.nn.utils.rnn for PackedSequence handling.
-    
+
     This replaces pack_padded_sequence and pad_packed_sequence with pass-through mocks,
     forcing the model to use padded tensors directly. This is necessary for static graph
     export to TVM.

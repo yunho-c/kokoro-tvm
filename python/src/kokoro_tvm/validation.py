@@ -16,19 +16,19 @@ def validate_decoder_against_pytorch(
     device: str = "cpu",
 ) -> dict:
     """Validate TVM decoder output against PyTorch decoder using real encoder data.
-    
+
     This function:
     1. Loads the full KModel (encoder + decoder)
     2. Runs encoder on a test phrase to get real intermediate tensors
     3. Runs both PyTorch and TVM decoders on same inputs
     4. Compares outputs numerically
-    
+
     Args:
         tvm_lib_path: Path to compiled TVM library (.so/.dylib file)
         seq_len: Expected sequence length (must match compilation)
         sample_rate: Audio sample rate for output files
         device: TVM device to use for inference ("cpu" or "metal")
-        
+
     Returns:
         Dictionary with validation metrics
     """
@@ -37,9 +37,9 @@ def validate_decoder_against_pytorch(
     from kokoro_tvm.pipeline import SAMPLES_PER_FRAME
     from tvm import relax
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("VALIDATION: Comparing TVM vs PyTorch decoder")
-    print("="*60)
+    print("=" * 60)
 
     # Load full Kokoro model
     repo_id = "hexgrad/Kokoro-82M"
@@ -58,8 +58,7 @@ def validate_decoder_against_pytorch(
     print(f"Test phonemes: '{test_phonemes}'")
 
     # Convert phonemes to input_ids
-    input_ids = list(filter(lambda i: i is not None,
-                           map(lambda p: kmodel.vocab.get(p), test_phonemes)))
+    input_ids = list(filter(lambda i: i is not None, map(lambda p: kmodel.vocab.get(p), test_phonemes)))
     input_ids = torch.LongTensor([[0, *input_ids, 0]])
     print(f"Input IDs shape: {input_ids.shape}")
 
@@ -141,7 +140,7 @@ def validate_decoder_against_pytorch(
         tvm.runtime.tensor(asr.numpy(), device=dev),
         tvm.runtime.tensor(F0_pred.numpy(), device=dev),
         tvm.runtime.tensor(N_pred.numpy(), device=dev),
-        tvm.runtime.tensor(style_embed.numpy(), device=dev)
+        tvm.runtime.tensor(style_embed.numpy(), device=dev),
     ]
 
     print("Running TVM decoder...")
@@ -170,9 +169,9 @@ def validate_decoder_against_pytorch(
     tvm_flat = tvm_result.reshape(-1)[:valid_samples]
     correlation = np.corrcoef(pytorch_flat, tvm_flat)[0, 1]
 
-    print("\n" + "-"*40)
+    print("\n" + "-" * 40)
     print("COMPARISON RESULTS:")
-    print("-"*40)
+    print("-" * 40)
     print(f"  Mean Absolute Error:  {mae:.6e}")
     print(f"  Max Absolute Error:   {max_error:.6e}")
     print(f"  Relative Error:       {rel_error:.2%}")
@@ -199,9 +198,9 @@ def validate_decoder_against_pytorch(
     print("\n📁 Audio files saved for qualitative comparison:")
     print(f"   - {pytorch_wav} (PyTorch decoder)")
     print(f"   - {tvm_wav} (TVM decoder)")
-    print(f"   Sample rate: {sample_rate} Hz, Duration: {len(pytorch_audio)/sample_rate:.2f}s")
+    print(f"   Sample rate: {sample_rate} Hz, Duration: {len(pytorch_audio) / sample_rate:.2f}s")
 
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     return {
         "passed": passed,

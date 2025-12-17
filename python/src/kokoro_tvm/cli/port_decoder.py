@@ -21,7 +21,9 @@ from kokoro_tvm.patches.sinegen import apply_sinegen_patch
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Compile Kokoro Decoder to TVM with static shapes")
-    parser.add_argument("--seq-len", type=int, default=150, help="Static sequence length for compilation (default: 150)")
+    parser.add_argument(
+        "--seq-len", type=int, default=150, help="Static sequence length for compilation (default: 150)"
+    )
     parser.add_argument(
         "--seq-lens",
         type=str,
@@ -35,34 +37,47 @@ def main():
         default=None,
         help="Directory for compiled outputs (used for multi-bucket builds).",
     )
-    parser.add_argument("--target", type=str, default="llvm",
-                        choices=list(TARGET_CONFIGS.keys()),
-                        help=f"Compilation target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable debug output from TVM extensions")
-    parser.add_argument("--no-weights", action="store_true",
-                        help="Skip loading pretrained weights (use random weights for faster iteration)")
-    parser.add_argument("--validate", action="store_true",
-                        help="Validate TVM output against PyTorch using real encoder data")
+    parser.add_argument(
+        "--target",
+        type=str,
+        default="llvm",
+        choices=list(TARGET_CONFIGS.keys()),
+        help=f"Compilation target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)",
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug output from TVM extensions")
+    parser.add_argument(
+        "--no-weights",
+        action="store_true",
+        help="Skip loading pretrained weights (use random weights for faster iteration)",
+    )
+    parser.add_argument(
+        "--validate", action="store_true", help="Validate TVM output against PyTorch using real encoder data"
+    )
     parser.add_argument(
         "--dump-ir",
         action="store_true",
         help="Dump intermediate decoder IR (before_opt/decomposed/legalized). Off by default.",
     )
-    parser.add_argument("--no-dlight", action="store_true",
-                        help="Skip DLight GPU scheduling (useful to debug numerical issues on Metal)")
-    parser.add_argument("--no-fuse", action="store_true",
-                        help="Skip FuseOps/FuseTIR (useful to debug fusion-related issues)")
-    parser.add_argument("--dlight-fallback-only", action="store_true",
-                        help="Apply only DLight Fallback scheduling (can help debug incorrect schedules)")
+    parser.add_argument(
+        "--no-dlight",
+        action="store_true",
+        help="Skip DLight GPU scheduling (useful to debug numerical issues on Metal)",
+    )
+    parser.add_argument(
+        "--no-fuse", action="store_true", help="Skip FuseOps/FuseTIR (useful to debug fusion-related issues)"
+    )
+    parser.add_argument(
+        "--dlight-fallback-only",
+        action="store_true",
+        help="Apply only DLight Fallback scheduling (can help debug incorrect schedules)",
+    )
 
     # Tuning arguments
-    parser.add_argument("--tune", action="store_true",
-                        help="Auto-tune with MetaSchedule before building")
-    parser.add_argument("--tune-trials", type=int, default=2000,
-                        help="Maximum tuning trials (default: 2000)")
-    parser.add_argument("--tune-dir", type=str, default="tuning_logs",
-                        help="Directory for tuning artifacts (default: tuning_logs)")
+    parser.add_argument("--tune", action="store_true", help="Auto-tune with MetaSchedule before building")
+    parser.add_argument("--tune-trials", type=int, default=2000, help="Maximum tuning trials (default: 2000)")
+    parser.add_argument(
+        "--tune-dir", type=str, default="tuning_logs", help="Directory for tuning artifacts (default: tuning_logs)"
+    )
 
     args = parser.parse_args()
 
@@ -71,7 +86,7 @@ def main():
         tvm_extensions.DEBUG_ENABLED = True
 
     # Resolve target
-    target, target_host, ext, desc = resolve_target(args.target)
+    target, target_host, ext, desc, export_func = resolve_target(args.target)
 
     seq_lens: list[int]
     if args.seq_lens:
@@ -95,18 +110,23 @@ def main():
         seq_len = seq_lens[0]
         if args.output is None:
             args.output = str(output_dir / f"decoder_compiled{ext}")
-        compile_decoder(args, target, seq_len=seq_len, output_path=args.output, dump_ir=args.dump_ir)
+        compile_decoder(
+            args, target, seq_len=seq_len, output_path=args.output, dump_ir=args.dump_ir, export_func=export_func
+        )
     else:
         if args.output is not None:
             raise ValueError("Use --output-dir for multi-bucket builds; --output only supports single build.")
         for seq_len in seq_lens:
             out_path = str(output_dir / f"decoder_compiled_seq{seq_len}{ext}")
             print(f"\n=== Compiling decoder bucket seq_len={seq_len} -> {out_path} ===")
-            compile_decoder(args, target, seq_len=seq_len, output_path=out_path, dump_ir=args.dump_ir)
+            compile_decoder(
+                args, target, seq_len=seq_len, output_path=out_path, dump_ir=args.dump_ir, export_func=export_func
+            )
 
     # Run validation if requested
     if args.validate:
         import platform
+
         is_macos_host = platform.system() == "Darwin"
 
         # Validation supported for: LLVM (CPU) or metal-macos on macOS host
@@ -118,23 +138,20 @@ def main():
             return
 
         for seq_len in seq_lens:
-            lib_path = (
-                args.output
-                if len(seq_lens) == 1
-                else str(output_dir / f"decoder_compiled_seq{seq_len}{ext}")
-            )
+            lib_path = args.output if len(seq_lens) == 1 else str(output_dir / f"decoder_compiled_seq{seq_len}{ext}")
             validate_decoder_against_pytorch(lib_path, seq_len, device=device)
 
 
-def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bool):
+def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bool, export_func: str | None = None):
     """Compile the Decoder module to TVM.
 
     Args:
         args: CLI arguments
         target: TVM target object
         seq_len: Static decoder length for this build
-        output_path: Output library path (.so/.dylib)
+        output_path: Output library path (.so/.dylib/.wasm)
         dump_ir: Whether to dump intermediate IR scripts
+        export_func: Export function type (None for native, "tvmjs" for WASM)
     """
     from kokoro_tvm.models import create_decoder_module
     from kokoro_tvm.models.decoder import get_decoder_config
@@ -211,6 +228,7 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
             else:
                 print("Applying DLight GPU scheduling for Metal...")
                 from tvm import dlight as dl
+
                 try:
                     if args.dlight_fallback_only:
                         mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
@@ -220,10 +238,10 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
                         # Note: GEMV is excluded due to crash on compound iteration patterns
                         # (KeyError in normalize() for complex spatial indexing like v_yy * 5 + v_ry)
                         mod = dl.ApplyDefaultSchedule(
-                            dl.gpu.Matmul(),           # Optimized tiling + shared memory for matmuls
-                            dl.gpu.Reduction(),        # Parallel reduction trees
-                            dl.gpu.GeneralReduction(), # Multi-axis reductions
-                            dl.gpu.Fallback(),         # Basic parallelization for everything else
+                            dl.gpu.Matmul(),  # Optimized tiling + shared memory for matmuls
+                            dl.gpu.Reduction(),  # Parallel reduction trees
+                            dl.gpu.GeneralReduction(),  # Multi-axis reductions
+                            dl.gpu.Fallback(),  # Basic parallelization for everything else
                         )(mod)
                         print("DLight scheduling applied (Matmul + Reduction + Fallback).")
                 except Exception as e:
@@ -243,12 +261,27 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
     print("Compilation successful!")
 
     # Save compiled library
-    ex.export_library(output_path)
-    print(f"Saved compiled library to: {output_path}")
+    if export_func == "tvmjs":
+        # WebGPU/WASM export requires tvmjs
+        from tvm.contrib import tvmjs
+
+        print(f"Exporting WASM library to: {output_path}")
+        ex.export_library(output_path, fcompile=tvmjs.create_tvmjs_wasm)
+        print(f"Saved WASM library to: {output_path}")
+
+        # For WebGPU, skip verification (requires browser)
+        print("WebGPU compilation successful!")
+        print("Note: Verification requires browser environment. Use RPC to test.")
+        return
+    else:
+        # Native export
+        ex.export_library(output_path)
+        print(f"Saved compiled library to: {output_path}")
 
     # Quick verification
     # For Metal targets: only run on macOS host for metal-macos, skip iOS
     import platform
+
     is_macos_host = platform.system() == "Darwin"
     is_ios_target = "ios" in str(target).lower()
 
@@ -290,7 +323,7 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
         tvm.runtime.tensor(asr_in, device=dev),
         tvm.runtime.tensor(f0_in, device=dev),
         tvm.runtime.tensor(n_in, device=dev),
-        tvm.runtime.tensor(s_in, device=dev)
+        tvm.runtime.tensor(s_in, device=dev),
     ]
 
     print(f"Running inference with test_len={test_len}...")

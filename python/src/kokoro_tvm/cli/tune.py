@@ -16,21 +16,23 @@ from kokoro_tvm.tuning import estimate_tuning_time, tune_module
 def main():
     """Main CLI entry point for tuning."""
     parser = argparse.ArgumentParser(description="Auto-tune Kokoro Decoder with MetaSchedule")
-    parser.add_argument("--seq-len", type=int, default=150,
-                        help="Static sequence length (default: 150)")
-    parser.add_argument("--target", type=str, default="llvm",
-                        choices=list(TARGET_CONFIGS.keys()),
-                        help=f"Target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)")
-    parser.add_argument("--work-dir", type=str, default="tuning_logs",
-                        help="Directory for tuning artifacts (default: tuning_logs)")
-    parser.add_argument("--max-trials", type=int, default=2000,
-                        help="Maximum tuning trials (default: 2000)")
-    parser.add_argument("--no-weights", action="store_true",
-                        help="Skip loading pretrained weights (faster for testing)")
-    parser.add_argument("--estimate", action="store_true",
-                        help="Only estimate tuning time, don't run tuning")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output path for tuned module")
+    parser.add_argument("--seq-len", type=int, default=150, help="Static sequence length (default: 150)")
+    parser.add_argument(
+        "--target",
+        type=str,
+        default="llvm",
+        choices=list(TARGET_CONFIGS.keys()),
+        help=f"Target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)",
+    )
+    parser.add_argument(
+        "--work-dir", type=str, default="tuning_logs", help="Directory for tuning artifacts (default: tuning_logs)"
+    )
+    parser.add_argument("--max-trials", type=int, default=2000, help="Maximum tuning trials (default: 2000)")
+    parser.add_argument(
+        "--no-weights", action="store_true", help="Skip loading pretrained weights (faster for testing)"
+    )
+    parser.add_argument("--estimate", action="store_true", help="Only estimate tuning time, don't run tuning")
+    parser.add_argument("--output", type=str, default=None, help="Output path for tuned module")
     args = parser.parse_args()
 
     # Resolve target

@@ -95,7 +95,7 @@ def apply_text_encoder_patch():
 
         x = x.transpose(-1, -2)
         x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
-        x_pad[:, :, :x.shape[-1]] = x
+        x_pad[:, :, : x.shape[-1]] = x
         x = x_pad
         x.masked_fill_(m, 0.0)
         return x
@@ -152,10 +152,10 @@ def apply_prosody_predictor_patch():
         # Skip unpacking
 
         x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]], device=x.device)
-        x_pad[:, :x.shape[1], :] = x
+        x_pad[:, : x.shape[1], :] = x
         x = x_pad
         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=False))
-        en = (d.transpose(-1, -2) @ alignment)
+        en = d.transpose(-1, -2) @ alignment
         return duration.squeeze(-1), en
 
     ProsodyPredictor.forward = prosody_predictor_forward
@@ -180,7 +180,7 @@ def apply_prosody_predictor_packed_lstm_patch():
         x_pad[:, : x.shape[1], :] = x
         x = x_pad
         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=False))
-        en = (d.transpose(-1, -2) @ alignment)
+        en = d.transpose(-1, -2) @ alignment
         return duration.squeeze(-1), en
 
     ProsodyPredictor.forward = prosody_predictor_forward
@@ -218,7 +218,7 @@ def apply_duration_encoder_patch():
                 x = F.dropout(x, p=self.dropout, training=False)
                 x = x.transpose(-1, -2)
                 x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
-                x_pad[:, :, :x.shape[-1]] = x
+                x_pad[:, :, : x.shape[-1]] = x
                 x = x_pad
         return x.transpose(-1, -2)
 
@@ -285,7 +285,7 @@ def apply_adain_patch():
 
 def apply_all_module_patches():
     """Apply all module patches needed for TVM export.
-    
+
     This is a convenience function to apply all patches at once.
     """
     apply_text_encoder_patch()

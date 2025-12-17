@@ -28,25 +28,25 @@ def create_decoder_module(
     dump_ir: Optional[str] = None,
 ) -> tvm.IRModule:
     """Create a Relax IRModule for the Kokoro decoder.
-    
+
     This function handles the full pipeline:
     1. Load model config from HuggingFace
     2. Initialize decoder with optional pretrained weights
     3. Export with torch.export
     4. Import to TVM Relax
-    
+
     The resulting module is target-agnostic and can be compiled
     for any supported target (CPU, Metal, CUDA, etc.).
-    
+
     Args:
         seq_len: Static sequence length for compilation
         load_weights: Whether to load pretrained weights (default: True)
         func_name: Name for the main function (default: "decoder_forward")
         dump_ir: Optional path to dump the IR before optimization
-        
+
     Returns:
         tvm.IRModule ready for compilation/tuning
-        
+
     Example:
         >>> mod = create_decoder_module(seq_len=150)
         >>> # Now compile for a specific target
@@ -69,13 +69,7 @@ def create_decoder_module(
     istftnet_params = config["istftnet"]
 
     # Initialize decoder
-    decoder = Decoder(
-        dim_in=hidden_dim,
-        style_dim=style_dim,
-        dim_out=n_mels,
-        disable_complex=True,
-        **istftnet_params
-    )
+    decoder = Decoder(dim_in=hidden_dim, style_dim=style_dim, dim_out=n_mels, disable_complex=True, **istftnet_params)
 
     # Load pretrained weights if requested
     if load_weights:
@@ -129,11 +123,9 @@ def create_decoder_module(
     print("Importing into TVM Relax...")
     print("Importing into TVM Relax...")
     from tvm.relax.frontend.torch import from_exported_program
+
     mod = from_exported_program(
-        exported_program,
-        keep_params_as_input=False,
-        unwrap_unit_return_tuple=False,
-        no_bind_return_tuple=False
+        exported_program, keep_params_as_input=False, unwrap_unit_return_tuple=False, no_bind_return_tuple=False
     )
 
     print("Relax Module created.")
@@ -167,7 +159,7 @@ def create_decoder_module(
 
 def get_decoder_config() -> dict:
     """Get the Kokoro decoder configuration.
-    
+
     Returns:
         Dictionary with hidden_dim, style_dim, n_mels, and istftnet params
     """

@@ -532,9 +532,7 @@ def test_lstm_custom_op():
     # Custom op
     with torch.no_grad():
         custom_out, custom_hn, custom_cn = lstm_forward(
-            x, h0, c0,
-            lstm_uni.weight_ih_l0, lstm_uni.weight_hh_l0,
-            lstm_uni.bias_ih_l0, lstm_uni.bias_hh_l0
+            x, h0, c0, lstm_uni.weight_ih_l0, lstm_uni.weight_hh_l0, lstm_uni.bias_ih_l0, lstm_uni.bias_hh_l0
         )
 
     # Compare
@@ -570,11 +568,17 @@ def test_lstm_custom_op():
     # Custom op
     with torch.no_grad():
         custom_out, custom_hn, custom_cn = lstm_forward_bidirectional(
-            x, h0, c0,
-            lstm_bi.weight_ih_l0, lstm_bi.weight_hh_l0,
-            lstm_bi.bias_ih_l0, lstm_bi.bias_hh_l0,
-            lstm_bi.weight_ih_l0_reverse, lstm_bi.weight_hh_l0_reverse,
-            lstm_bi.bias_ih_l0_reverse, lstm_bi.bias_hh_l0_reverse
+            x,
+            h0,
+            c0,
+            lstm_bi.weight_ih_l0,
+            lstm_bi.weight_hh_l0,
+            lstm_bi.bias_ih_l0,
+            lstm_bi.bias_hh_l0,
+            lstm_bi.weight_ih_l0_reverse,
+            lstm_bi.weight_hh_l0_reverse,
+            lstm_bi.bias_ih_l0_reverse,
+            lstm_bi.bias_hh_l0_reverse,
         )
 
     # Compare

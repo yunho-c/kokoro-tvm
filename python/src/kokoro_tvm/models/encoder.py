@@ -328,7 +328,9 @@ def create_f0n_module(
             return x_norm * mask
 
         @classmethod
-        def _adain1d_masked(cls, adain: torch.nn.Module, x: torch.Tensor, s: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        def _adain1d_masked(
+            cls, adain: torch.nn.Module, x: torch.Tensor, s: torch.Tensor, lengths: torch.Tensor
+        ) -> torch.Tensor:
             h = adain.fc(s)
             h = h.view(h.size(0), h.size(1), 1)
             gamma, beta = torch.chunk(h, chunks=2, dim=1)

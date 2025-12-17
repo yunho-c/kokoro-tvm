@@ -13,7 +13,9 @@ from tvm.contrib import mps
 
 
 def _has_mps_lstm() -> bool:
-    return bool(tvm.get_global_func("tvm.contrib.mps.lstm", True)) and bool(tvm.get_global_func("device_api.metal", True))
+    return bool(tvm.get_global_func("tvm.contrib.mps.lstm", True)) and bool(
+        tvm.get_global_func("device_api.metal", True)
+    )
 
 
 def _has_mps_lstm_packed() -> bool:
@@ -71,7 +73,9 @@ def _mps_lstm_run_unidirectional(
     H0 = te.placeholder((1, batch_size, hidden_size), name="H0", dtype="float32")
     C0 = te.placeholder((1, batch_size, hidden_size), name="C0", dtype="float32")
 
-    Y, HN, CN = mps.lstm(X, Wi, Wh, Bi, Bh, H0, C0, hidden_size, num_layers=1, batch_first=batch_first, bidirectional=False)
+    Y, HN, CN = mps.lstm(
+        X, Wi, Wh, Bi, Bh, H0, C0, hidden_size, num_layers=1, batch_first=batch_first, bidirectional=False
+    )
 
     prim = te.create_prim_func([X, Wi, Wh, Bi, Bh, H0, C0, Y, HN, CN])
     ex = tvm.compile(prim, target="metal")
@@ -192,10 +196,38 @@ def test_mps_lstm_accuracy_matrix():
     seed = 42
 
     cases: list[dict[str, object]] = [
-        {"seq_len": 4, "batch_size": 1, "input_size": 16, "hidden_size": 8, "batch_first": False, "bidirectional": False},
-        {"seq_len": 8, "batch_size": 2, "input_size": 32, "hidden_size": 16, "batch_first": False, "bidirectional": False},
-        {"seq_len": 8, "batch_size": 2, "input_size": 32, "hidden_size": 16, "batch_first": True, "bidirectional": False},
-        {"seq_len": 6, "batch_size": 1, "input_size": 16, "hidden_size": 8, "batch_first": False, "bidirectional": True},
+        {
+            "seq_len": 4,
+            "batch_size": 1,
+            "input_size": 16,
+            "hidden_size": 8,
+            "batch_first": False,
+            "bidirectional": False,
+        },
+        {
+            "seq_len": 8,
+            "batch_size": 2,
+            "input_size": 32,
+            "hidden_size": 16,
+            "batch_first": False,
+            "bidirectional": False,
+        },
+        {
+            "seq_len": 8,
+            "batch_size": 2,
+            "input_size": 32,
+            "hidden_size": 16,
+            "batch_first": True,
+            "bidirectional": False,
+        },
+        {
+            "seq_len": 6,
+            "batch_size": 1,
+            "input_size": 16,
+            "hidden_size": 8,
+            "batch_first": False,
+            "bidirectional": True,
+        },
         {"seq_len": 6, "batch_size": 1, "input_size": 16, "hidden_size": 8, "batch_first": True, "bidirectional": True},
     ]
 
@@ -283,7 +315,9 @@ def test_mps_lstm_packed_batch1():
     max_diff_out = float(np.abs(out_pt.numpy() - y_tvm.numpy()).max())
     max_diff_h = float(np.abs(hn_pt.numpy() - hn_tvm.numpy()).max())
     max_diff_c = float(np.abs(cn_pt.numpy() - cn_tvm.numpy()).max())
-    print(f"packed(batch=1, len={length0}/{seq_len}): max_out={max_diff_out:.2e} max_h={max_diff_h:.2e} max_c={max_diff_c:.2e}")
+    print(
+        f"packed(batch=1, len={length0}/{seq_len}): max_out={max_diff_out:.2e} max_h={max_diff_h:.2e} max_c={max_diff_c:.2e}"
+    )
 
     tol = 5e-4
     return max_diff_out < tol and max_diff_h < tol and max_diff_c < tol

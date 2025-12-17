@@ -22,7 +22,9 @@ def _stats(name: str, x: np.ndarray) -> None:
     arr_f = arr[finite] if np.any(finite) else np.array([], dtype=np.float32)
     min_v = float(np.min(arr_f)) if arr_f.size else float("nan")
     max_v = float(np.max(arr_f)) if arr_f.size else float("nan")
-    print(f"{name}: shape={tuple(np.asarray(x).shape)} n={arr.size} finite_frac={finite_frac:.6f} min={min_v:.6g} max={max_v:.6g}")
+    print(
+        f"{name}: shape={tuple(np.asarray(x).shape)} n={arr.size} finite_frac={finite_frac:.6f} min={min_v:.6g} max={max_v:.6g}"
+    )
 
 
 def main() -> int:
@@ -90,4 +92,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

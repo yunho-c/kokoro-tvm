@@ -13,23 +13,22 @@ from kokoro_tvm.profiling import benchmark_module, create_benchmark_report
 def main():
     """Main CLI entry point for profiling."""
     parser = argparse.ArgumentParser(description="Profile compiled Kokoro Decoder")
-    parser.add_argument("module", type=str,
-                        help="Path to compiled module (.so or .dylib)")
-    parser.add_argument("--target", type=str, default="llvm",
-                        choices=list(TARGET_CONFIGS.keys()),
-                        help=f"Target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)")
-    parser.add_argument("--seq-len", type=int, default=150,
-                        help="Sequence length for benchmark inputs (default: 150)")
-    parser.add_argument("--warmup", type=int, default=5,
-                        help="Number of warmup runs (default: 5)")
-    parser.add_argument("--repeat", type=int, default=20,
-                        help="Number of timed runs (default: 20)")
-    parser.add_argument("--func-name", type=str, default="decoder_forward",
-                        help="Function name to benchmark (default: decoder_forward)")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output path for JSON report")
-    parser.add_argument("--compare", type=str, default=None,
-                        help="Path to another module to compare against")
+    parser.add_argument("module", type=str, help="Path to compiled module (.so or .dylib)")
+    parser.add_argument(
+        "--target",
+        type=str,
+        default="llvm",
+        choices=list(TARGET_CONFIGS.keys()),
+        help=f"Target: {', '.join(TARGET_CONFIGS.keys())} (default: llvm)",
+    )
+    parser.add_argument("--seq-len", type=int, default=150, help="Sequence length for benchmark inputs (default: 150)")
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup runs (default: 5)")
+    parser.add_argument("--repeat", type=int, default=20, help="Number of timed runs (default: 20)")
+    parser.add_argument(
+        "--func-name", type=str, default="decoder_forward", help="Function name to benchmark (default: decoder_forward)"
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output path for JSON report")
+    parser.add_argument("--compare", type=str, default=None, help="Path to another module to compare against")
     args = parser.parse_args()
 
     module_path = Path(args.module)
@@ -87,6 +86,7 @@ def main():
             print()
 
             from kokoro_tvm.profiling.benchmark import compare_results
+
             comparison = compare_results(result, compare_result)
 
             print("Comparison:")

@@ -155,7 +155,15 @@ def _tail_summary_1d(x: np.ndarray, valid: int, *, preview: int = 8, atol: float
     valid = int(max(0, min(valid, total)))
     pad = flat[valid:]
     if pad.size == 0:
-        return {"valid": valid, "total": total, "pad": 0, "finite_frac": 1.0, "nonzero_frac": 0.0, "head": [], "tail": []}
+        return {
+            "valid": valid,
+            "total": total,
+            "pad": 0,
+            "finite_frac": 1.0,
+            "nonzero_frac": 0.0,
+            "head": [],
+            "tail": [],
+        }
     finite = np.isfinite(pad)
     finite_frac = float(np.mean(finite))
     nonzero_frac = float(np.mean(np.abs(pad) > atol))
@@ -276,7 +284,9 @@ def _fmt_bool_flag(ok: bool, text: str) -> str:
     return text if ok else f"!! {text}"
 
 
-def _fmt_float_flag(value: float, *, ok_min: float | None = None, ok_max: float | None = None, fmt: str = "{:.4f}") -> str:
+def _fmt_float_flag(
+    value: float, *, ok_min: float | None = None, ok_max: float | None = None, fmt: str = "{:.4f}"
+) -> str:
     ok = True
     if ok_min is not None:
         ok = ok and (value >= ok_min)
@@ -719,7 +729,9 @@ def main() -> int:
     parser.add_argument("--hybrid", action="store_true", help="Hybrid mode (encoder on CPU, decoder on device)")
     parser.add_argument("--save-dir", type=str, default=None, help="If set, write wavs for listening")
     parser.add_argument("--no-rich", action="store_true", help="Disable Rich formatting (plain text output)")
-    parser.add_argument("--verbose", action="store_true", help="Verbose output (distributions, percentiles, extra tables)")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Verbose output (distributions, percentiles, extra tables)"
+    )
     parser.add_argument(
         "--cross-decoder",
         action="store_true",
@@ -789,9 +801,13 @@ def main() -> int:
 
     cur_len = int(trace_static["cur_len"])
     _rule("Inputs")
-    print(f"text={args.text!r} voice={args.voice!r} device={args.device!r} lib_dir={args.lib_dir!r} tvm_ref_s={args.tvm_ref_s!r}")
+    print(
+        f"text={args.text!r} voice={args.voice!r} device={args.device!r} lib_dir={args.lib_dir!r} tvm_ref_s={args.tvm_ref_s!r}"
+    )
     print(f"cur_len={cur_len}")
-    print(f"frames_dynamic={trace_dyn['frames']}, frames_static={trace_static['frames']}, frames_tvm={trace_tvm['frames']}")
+    print(
+        f"frames_dynamic={trace_dyn['frames']}, frames_static={trace_static['frames']}, frames_tvm={trace_tvm['frames']}"
+    )
 
     _print_metrics_table(
         "Style vectors",
@@ -935,8 +951,12 @@ def main() -> int:
         ],
     )
 
-    asr_tvm, frames_tvm_recon = _compute_asr_from_trace_with_target(trace_tvm, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
-    asr_static, frames_static_recon = _compute_asr_from_trace_with_target(trace_static, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN)
+    asr_tvm, frames_tvm_recon = _compute_asr_from_trace_with_target(
+        trace_tvm, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN
+    )
+    asr_static, frames_static_recon = _compute_asr_from_trace_with_target(
+        trace_static, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN
+    )
     asr_static_np, frames_static_np_recon = _compute_asr_from_trace_with_target(
         trace_static_nopack, cur_len=cur_len, total_frames=STATIC_AUDIO_LEN
     )
@@ -1066,7 +1086,9 @@ def main() -> int:
             frames=tvm_frames,
         )
         corr_x1, lag_x1 = _best_lag_corr(audio_static, audio_pt_from_tvm, max_lag=2400)
-        corr_x1d, lag_x1d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_pt_from_tvm, max_lag=2400)
+        corr_x1d, lag_x1d = _best_lag_corr(
+            np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_pt_from_tvm, max_lag=2400
+        )
         corr_x1b, lag_x1b = _best_lag_corr(audio_tvm, audio_pt_from_tvm, max_lag=2400)
 
         pt_pred_dur = np.asarray(trace_static["pred_dur"]).reshape(-1)
@@ -1086,7 +1108,9 @@ def main() -> int:
             frames=pt_frames,
         )
         corr_x2, lag_x2 = _best_lag_corr(audio_static, audio_tvm_from_pt, max_lag=2400)
-        corr_x2b2, lag_x2b2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt, max_lag=2400)
+        corr_x2b2, lag_x2b2 = _best_lag_corr(
+            np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt, max_lag=2400
+        )
         corr_x2b, lag_x2b = _best_lag_corr(audio_tvm, audio_tvm_from_pt, max_lag=2400)
 
         pt_np_pred_dur = np.asarray(trace_static_nopack["pred_dur"]).reshape(-1)
@@ -1105,8 +1129,12 @@ def main() -> int:
             frames=pt_np_frames,
         )
         corr_x3, lag_x3 = _best_lag_corr(audio_static, audio_tvm_from_pt_np, max_lag=2400)
-        corr_x3b, lag_x3b = _best_lag_corr(np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
-        corr_x3d, lag_x3d = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400)
+        corr_x3b, lag_x3b = _best_lag_corr(
+            np.asarray(trace_static_nopack["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400
+        )
+        corr_x3d, lag_x3d = _best_lag_corr(
+            np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_pt_np, max_lag=2400
+        )
         corr_x3t, lag_x3t = _best_lag_corr(audio_tvm, audio_tvm_from_pt_np, max_lag=2400)
 
         asr_dyn_pad = _pad_3d_time(asr_dyn, target_t=STATIC_AUDIO_LEN)
@@ -1121,7 +1149,9 @@ def main() -> int:
             s128=pt_s128,
             frames=frames_dyn_clamped,
         )
-        corr_x4, lag_x4 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_dyn, max_lag=2400)
+        corr_x4, lag_x4 = _best_lag_corr(
+            np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_tvm_from_dyn, max_lag=2400
+        )
         corr_x4s, lag_x4s = _best_lag_corr(audio_static, audio_tvm_from_dyn, max_lag=2400)
         corr_x4t, lag_x4t = _best_lag_corr(audio_tvm, audio_tvm_from_dyn, max_lag=2400)
 
@@ -1146,7 +1176,15 @@ def main() -> int:
             corr_table.add_column("lag", justify="right")
 
             cases = [
-                ("pt(dec<-tvm)", audio_pt_from_tvm, int(tvm_frames), (corr_x1d, lag_x1d), (corr_x1, lag_x1), (corr_x1b, lag_x1b), (0.0, 0)),
+                (
+                    "pt(dec<-tvm)",
+                    audio_pt_from_tvm,
+                    int(tvm_frames),
+                    (corr_x1d, lag_x1d),
+                    (corr_x1, lag_x1),
+                    (corr_x1b, lag_x1b),
+                    (0.0, 0),
+                ),
                 (
                     "tvm(dec<-pt.static)",
                     audio_tvm_from_pt,
@@ -1303,7 +1341,9 @@ def main() -> int:
             stats_by_bucket[b] = st
 
             corr_ref, lag_ref = _best_lag_corr(ref_audio, audio_b, max_lag=2400)
-            corr_dyn, lag_dyn = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_b, max_lag=2400)
+            corr_dyn, lag_dyn = _best_lag_corr(
+                np.asarray(trace_dyn["audio_trimmed"]).reshape(-1), audio_b, max_lag=2400
+            )
             corr_static, lag_static = _best_lag_corr(audio_static, audio_b, max_lag=2400)
             corr_tvm2, lag_tvm2 = _best_lag_corr(audio_tvm, audio_b, max_lag=2400)
             corr_rows.append((b, corr_ref, lag_ref, corr_dyn, lag_dyn, corr_static, lag_static, corr_tvm2, lag_tvm2))
@@ -1311,10 +1351,14 @@ def main() -> int:
             if args.save_dir:
                 out_dir = Path(args.save_dir)
                 out_dir.mkdir(parents=True, exist_ok=True)
-                sf.write(out_dir / f"trace_tvm_dec_bucket{b}_from_{args.decoder_bucket_sweep_input}.wav", audio_b, 24000)
+                sf.write(
+                    out_dir / f"trace_tvm_dec_bucket{b}_from_{args.decoder_bucket_sweep_input}.wav", audio_b, 24000
+                )
 
         if _USE_RICH:
-            stats_table = Table(title=f"Decoder bucket sweep stats (inputs={args.decoder_bucket_sweep_input})", show_lines=False)
+            stats_table = Table(
+                title=f"Decoder bucket sweep stats (inputs={args.decoder_bucket_sweep_input})", show_lines=False
+            )
             stats_table.add_column("bucket", justify="right")
             stats_table.add_column("finite", justify="right")
             stats_table.add_column("nonzero", justify="right")
@@ -1366,13 +1410,22 @@ def main() -> int:
     _print_metrics_table(
         "dynamic vs static",
         [
-            ("bert.d_en[:cur_len]", _metrics(np.asarray(trace_dyn["d_en"]), np.asarray(trace_static["d_en"])[:, :, :cur_len])),
+            (
+                "bert.d_en[:cur_len]",
+                _metrics(np.asarray(trace_dyn["d_en"]), np.asarray(trace_static["d_en"])[:, :, :cur_len]),
+            ),
             (
                 "duration.logits",
-                _metrics(np.asarray(trace_dyn["duration_logits"]), np.asarray(trace_static["duration_logits"])[:, :cur_len, :]),
+                _metrics(
+                    np.asarray(trace_dyn["duration_logits"]),
+                    np.asarray(trace_static["duration_logits"])[:, :cur_len, :],
+                ),
             ),
             ("duration.d", _metrics(np.asarray(trace_dyn["d"]), np.asarray(trace_static["d"])[:, :cur_len, :])),
-            ("text_encoder.t_en", _metrics(np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len])),
+            (
+                "text_encoder.t_en",
+                _metrics(np.asarray(trace_dyn["t_en"]), np.asarray(trace_static["t_en"])[:, :, :cur_len]),
+            ),
         ],
     )
     corr2, lag2 = _best_lag_corr(np.asarray(trace_dyn["audio_trimmed"]), audio_static, max_lag=2400)

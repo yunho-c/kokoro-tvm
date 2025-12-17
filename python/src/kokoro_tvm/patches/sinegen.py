@@ -12,7 +12,7 @@ _patched = False
 
 def _f02sine_friendly(self, f0_values):
     """Dynamic-shape-friendly replacement for SineGen._f02sine.
-    
+
     This patch avoids scale_factor interpolation which confuses torch.export,
     instead using explicit size-based interpolation.
     """
@@ -23,26 +23,23 @@ def _f02sine_friendly(self, f0_values):
 
     if not self.flag_for_pulse:
         tgt_len = f0_values.shape[1] // self.upsample_scale
-        rad_values = F.interpolate(
-            rad_values.transpose(1, 2), size=tgt_len, mode="linear"
-        ).transpose(1, 2)
+        rad_values = F.interpolate(rad_values.transpose(1, 2), size=tgt_len, mode="linear").transpose(1, 2)
         phase = torch.cumsum(rad_values, dim=1) * 2 * torch.pi
         phase = F.interpolate(
-            phase.transpose(1, 2) * self.upsample_scale,
-            size=f0_values.shape[1],
-            mode="linear"
+            phase.transpose(1, 2) * self.upsample_scale, size=f0_values.shape[1], mode="linear"
         ).transpose(1, 2)
         sines = torch.sin(phase)
     else:
         # Fallback to original for pulse mode
         from kokoro.istftnet import SineGen
+
         return SineGen._old_f02sine(self, f0_values)
     return sines
 
 
 def apply_sinegen_patch():
     """Apply the SineGen._f02sine patch if not already applied.
-    
+
     This must be called before torch.export to ensure dynamic shapes work.
     """
     global _patched

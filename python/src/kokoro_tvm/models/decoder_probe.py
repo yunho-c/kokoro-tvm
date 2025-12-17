@@ -40,7 +40,9 @@ class DecoderProbe(torch.nn.Module):
         super().__init__()
         self.decoder = decoder
 
-    def forward(self, asr: torch.Tensor, f0_curve: torch.Tensor, n_curve: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, asr: torch.Tensor, f0_curve: torch.Tensor, n_curve: torch.Tensor, s: torch.Tensor
+    ) -> torch.Tensor:
         dec = self.decoder
         f0 = dec.F0_conv(f0_curve.unsqueeze(1))
         n = dec.N_conv(n_curve.unsqueeze(1))

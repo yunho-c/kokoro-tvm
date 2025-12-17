@@ -1360,17 +1360,11 @@ def _convolution(self, node):
         else:
             raise ValueError(f"Unsupported transposed convolution dimensionality: {ndim}")
     elif ndim == 3:  # 1D convolution (N, C, W)
-        out = self._conv1d_impl(
-            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-        )
+        out = self._conv1d_impl(x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups)
     elif ndim == 4:  # 2D convolution (N, C, H, W)
-        out = self._conv2d_impl(
-            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-        )
+        out = self._conv2d_impl(x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups)
     elif ndim == 5:  # 3D convolution (N, C, D, H, W)
-        out = self._conv3d_impl(
-            x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups
-        )
+        out = self._conv3d_impl(x, weight, bias=bias, strides=stride, padding=padding, dilation=dilation, groups=groups)
     else:
         raise ValueError(f"Unsupported convolution dimensionality: {ndim}")
 
