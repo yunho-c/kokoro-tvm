@@ -122,7 +122,7 @@ def test_e2e_audio_matches_reference():
     for _, phonemes in phoneme_chunks:
         input_ids = text_to_ids(phonemes, vocab)
         ref_s = select_ref_s(voice_pack_tvm, len(phonemes))
-        audio_tvm = pipeline.forward(input_ids, ref_s, speed=speed).squeeze().cpu().numpy()
+        audio_tvm = pipeline.forward(input_ids, ref_s, speed=speed).squeeze()
         tvm_audio_chunks.append(audio_tvm)
         tvm_frames_total += int(round(audio_tvm.size / SAMPLES_PER_FRAME))
 
