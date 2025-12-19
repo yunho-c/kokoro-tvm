@@ -33,6 +33,10 @@ py -3.12 python/src/kokoro_tvm/cli/compile_kokoro.py
 
 - **No Numbered Headings in Comments**: Do not use numbers (e.g., "1. Step One", "2. Step Two") in comment headings. Use descriptive text only.
 
+## Git
+
+- Commit messages must start with one of: `feat`, `fix`, `misc`, `docs`.
+
 ## Static Shape Conventions
 
 The pipeline expects statically-compiled shapes that match `python/src/kokoro_tvm/pipeline.py`:
