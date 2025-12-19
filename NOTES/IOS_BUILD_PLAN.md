@@ -31,14 +31,18 @@ cmake .. \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_BUILD_TYPE=Release \
   -DUSE_METAL=ON \
+  -DUSE_MPS=ON \
   -DUSE_LLVM=OFF \
   -DUSE_CUDA=OFF \
   -DUSE_OPENCL=OFF \
   -DUSE_VULKAN=OFF \
   -DUSE_RPC=OFF \
-  -DBUILD_SHARED_LIBS=OFF
+  -DBUILD_SHARED_LIBS=OFF \
+  -DTVM_FFI_USE_LIBBACKTRACE=OFF \
+  -DTVM_FFI_BACKTRACE_ON_SEGFAULT=OFF
+# NOTE: backtrace related options may not work
 
-cmake --build . --config Release
+cmake --build . --config Release -j8
 ```
 
 Outputs: static `libtvm_runtime.a` (and possibly `libtvm.a` if enabled).
@@ -57,9 +61,13 @@ cmake .. \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF
+  -DBUILD_SHARED_LIBS=OFF \
+  -DTVM_FFI_USE_LIBBACKTRACE=OFF \
+  -DTVM_FFI_BACKTRACE_ON_SEGFAULT=OFF
+# NOTE: backtrace related options may not work
 
-cmake --build . --config Release
+cmake --build . --config Release -j8
+
 ```
 
 Outputs: static `libtvm_ffi.a`.
@@ -101,6 +109,12 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=Foundation");
 }
 ```
+
+Environment overrides:
+
+- `TVM_BUILD_DIR`: path to the TVM build output directory (default: `reference/tvm/build-ios`)
+- `TVM_FFI_BUILD_DIR`: path to the tvm-ffi build output directory (default: `reference/tvm/3rdparty/tvm-ffi/build-ios`)
+- `KOKORO_TVM_LINK_TVM=1`: enable linking TVM on non-iOS targets (disabled by default)
 
 ### Disable `libloading` on iOS
 
