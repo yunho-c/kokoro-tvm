@@ -6,7 +6,7 @@
 use crate::constants::{SAMPLES_PER_FRAME, STATIC_AUDIO_LEN, STATIC_TEXT_LEN};
 use crate::preprocessing::{build_alignment, create_masks, pad_input_ids};
 use anyhow::Result;
-use ndarray::{s, Array1, Array3, ArrayD};
+use ndarray::{s, Array2, Array3, ArrayD};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -19,15 +19,19 @@ macro_rules! tvm_err {
 
 /// Extract a tensor from a function output.
 /// Handles both direct Tensor returns and Array (tuple) returns.
-fn extract_tensor_from_output(output: tvm_ffi::Any, index: usize) -> Result<tvm_ffi::Tensor> {
+fn extract_tensor_from_output(output: &tvm_ffi::Any, index: usize) -> Result<tvm_ffi::Tensor> {
     // First, try to convert directly to Tensor
     let type_index = output.type_index();
-    
+    let output_view = tvm_ffi::AnyView::from(output);
+
     // Check if it's a Tensor (type index for Tensor)
     if type_index == tvm_ffi::TypeIndex::kTVMFFITensor as i32 {
-        return tvm_err!(output.try_into(), "Failed to convert output to Tensor");
+        return tvm_err!(
+            output_view.try_into(),
+            "Failed to convert output to Tensor"
+        );
     }
-    
+
     // Otherwise, assume it's an Array and use ffi.ArrayGetItem
     let array_get_item = tvm_err!(
         tvm_ffi::Function::get_global("ffi.ArrayGetItem"),
@@ -35,7 +39,6 @@ fn extract_tensor_from_output(output: tvm_ffi::Any, index: usize) -> Result<tvm_
     )?;
     
     // Use call_packed with AnyView since &Any doesn't implement ArgIntoRef
-    let output_view = tvm_ffi::AnyView::from(&output);
     let index_val = index as i64;
     let args = [output_view, tvm_ffi::AnyView::from(&index_val)];
     
@@ -77,6 +80,14 @@ fn create_bool_tensor(data: &[u8], shape: &[i64]) -> Result<tvm_ffi::Tensor> {
     }
     
     Ok(tensor)
+}
+
+/// Convert a CPU tensor to an owned ndarray (f32).
+fn tensor_to_array_d(tensor: &tvm_ffi::Tensor) -> Result<ArrayD<f32>> {
+    let shape: Vec<usize> = tensor.shape().iter().map(|&dim| dim as usize).collect();
+    let data = tvm_err!(tensor.data_as_slice::<f32>(), "Failed to read tensor data")?.to_vec();
+    ArrayD::from_shape_vec(shape, data)
+        .map_err(|e| anyhow::anyhow!("Failed to reshape tensor data: {}", e))
 }
 
 /// TVM-based inference pipeline for Kokoro TTS.
@@ -375,7 +386,7 @@ impl KokoroPipeline {
             "BERT forward failed"
         )?;
         // BERT returns a tuple, extract the first element (d_en)
-        let d_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(bert_out, 0)?;
+        let d_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&bert_out, 0)?;
 
         // --- Duration: d_en, s, lengths, mask -> (duration_logits, d) ---
         let s_tvm = tvm_err!(
@@ -400,13 +411,13 @@ impl KokoroPipeline {
             "Duration forward failed"
         )?;
 
-        // NOTE: Tuple extraction from tvm_ffi::Any is not directly supported.
-        // This is a placeholder - the actual API may differ.
-        let _ = duration_out;
+        let duration_logits_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&duration_out, 0)?;
+        let d_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&duration_out, 1)?;
 
-        // --- MOCK DATA FOR COMPILATION ---
-        let duration_logits = ArrayD::<f32>::zeros(vec![1, STATIC_TEXT_LEN, 10]);
-        let d_np = Array3::<f32>::zeros((1, STATIC_TEXT_LEN, 640));
+        let duration_logits = tensor_to_array_d(&duration_logits_tvm)?;
+        let d_np: Array3<f32> = tensor_to_array_d(&d_tvm)?
+            .into_dimensionality()
+            .map_err(|e| anyhow::anyhow!("Expected duration output to be 3D: {}", e))?;
 
         // --- Alignment computation ---
         let (full_aln, actual_audio_len) = build_alignment(&duration_logits, cur_len, speed);
@@ -415,18 +426,28 @@ impl KokoroPipeline {
         let d_transposed = d_np.permuted_axes([0, 2, 1]);
         let en = Self::matmul_3d(&d_transposed, &full_aln);
 
-        // --- F0N: en, s -> (F0, N) ---
-        // Note: The compiled model expects only 2 args, not 3
+        // --- F0N: en, s, frame_lengths -> (F0, N) ---
         let en_tvm = tvm_err!(
             tvm_ffi::Tensor::from_slice(en.as_slice().unwrap(), &[1, 640, STATIC_AUDIO_LEN as i64]),
             "Failed to create en tensor"
         )?;
+        let frame_lengths_tvm = tvm_err!(
+            tvm_ffi::Tensor::from_slice(&[actual_audio_len as i64], &[1]),
+            "Failed to create frame_lengths tensor"
+        )?;
 
         let f0n_out = tvm_err!(
-            self.f_f0n.call_tuple((&en_tvm, &s_tvm)),
+            self.f_f0n.call_tuple((&en_tvm, &s_tvm, &frame_lengths_tvm)),
             "F0N forward failed"
         )?;
-        let _ = f0n_out;
+        let f0_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&f0n_out, 0)?;
+        let n_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&f0n_out, 1)?;
+        let f0_np: Array2<f32> = tensor_to_array_d(&f0_tvm)?
+            .into_dimensionality()
+            .map_err(|e| anyhow::anyhow!("Expected f0 output to be 2D: {}", e))?;
+        let n_np: Array2<f32> = tensor_to_array_d(&n_tvm)?
+            .into_dimensionality()
+            .map_err(|e| anyhow::anyhow!("Expected n output to be 2D: {}", e))?;
 
         // --- Text Encoder: input_ids, lengths, mask -> t_en ---
         let t_en_out = tvm_err!(
@@ -434,18 +455,19 @@ impl KokoroPipeline {
                 .call_tuple((&input_ids_tvm, &lengths_tvm, &text_mask_tvm)),
             "Text encoder forward failed"
         )?;
-        let _ = t_en_out;
+        let t_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&t_en_out, 0)?;
+        let t_en: Array3<f32> = tensor_to_array_d(&t_en_tvm)?
+            .into_dimensionality()
+            .map_err(|e| anyhow::anyhow!("Expected text encoder output to be 3D: {}", e))?;
 
-        // MOCK: Use placeholder tensors for decoder
-        let t_en = Array3::<f32>::zeros((1, 512, STATIC_TEXT_LEN));
         let asr = Self::matmul_3d(&t_en, &full_aln);
 
         // --- Decoder: asr, F0, N, style[:128] -> audio ---
         let bucket_len = self.select_decoder_bucket(actual_audio_len);
 
         let asr_b = asr.slice(s![.., .., ..bucket_len]).to_owned();
-        let f0_b = Array1::<f32>::zeros(bucket_len * 2);
-        let n_b = Array1::<f32>::zeros(bucket_len * 2);
+        let f0_b = f0_np.slice(s![.., ..bucket_len * 2]).to_owned();
+        let n_b = n_np.slice(s![.., ..bucket_len * 2]).to_owned();
 
         let asr_tvm = tvm_err!(
             tvm_ffi::Tensor::from_slice(asr_b.as_slice().unwrap(), &[1, 512, bucket_len as i64]),
@@ -473,11 +495,13 @@ impl KokoroPipeline {
             f_decoder.call_tuple((&asr_tvm, &f0_b_tvm, &n_b_tvm, &style_128_tvm)),
             "Decoder forward failed"
         )?;
-        let _ = audio_out;
+        let audio_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&audio_out, 0)?;
+        let audio_data =
+            tvm_err!(audio_tvm.data_as_slice::<f32>(), "Failed to read audio tensor")?;
 
-        // MOCK: Return placeholder audio
         let target_samples = actual_audio_len * SAMPLES_PER_FRAME;
-        let audio = vec![0.0f32; target_samples];
+        let trim_len = target_samples.min(audio_data.len());
+        let audio = audio_data[..trim_len].to_vec();
 
         Ok(audio)
     }
