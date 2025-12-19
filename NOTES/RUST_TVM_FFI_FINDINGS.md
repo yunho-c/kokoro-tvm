@@ -74,11 +74,65 @@ let func = lib.get_function("bert_forward")?;
 // Load a module (triggers Relax deserialization via libtvm_runtime)
 let module = tvm_ffi::Module::load_from_file("module.so")?;
 
-// Create tensors from slices
+// Create CPU tensors from slices
 let tensor = tvm_ffi::Tensor::from_slice(&data, &[1, 512])?;
 
 // Call functions with tuples
 func.call_tuple((&input, &output))?;
+```
+
+#### Device tensors and data movement (CPU <-> GPU)
+
+The `tvm-ffi` Rust crate exposes CPU-only helpers like `Tensor::from_slice` and
+`Tensor::data_as_slice`, which assume CPU-contiguous memory. To work with GPU
+devices (Metal/CUDA), you need to allocate device tensors explicitly and copy
+data in/out using runtime functions registered by `libtvm_runtime`:
+
+```rust
+// Allocate a device tensor (works for Metal/CUDA)
+let alloc = tvm_ffi::Function::get_global("runtime.TVMTensorAllocWithScope")?;
+let shape = tvm_ffi::Shape::from(&[1, 512][..]);
+let mem_scope: Option<tvm_ffi::String> = None;
+let tensor_any = alloc.call_tuple((shape, dtype, device, mem_scope))?;
+let tensor: tvm_ffi::Tensor = tensor_any.try_into()?;
+
+// Copy host data into device tensor
+let copy_from = tvm_ffi::Function::get_global("runtime.TVMTensorCopyFromBytes")?;
+copy_from.call_tuple((&tensor, host_ptr, nbytes))?;
+
+// Copy device data back to host
+let copy_to = tvm_ffi::Function::get_global("runtime.TVMTensorCopyToBytes")?;
+copy_to.call_tuple((&tensor, host_ptr, nbytes))?;
+```
+
+Notes:
+- `Tensor::data_as_slice()` is CPU-only; it fails on non-CPU devices.
+- These runtime copy helpers require `libtvm_runtime` (or `libtvm`) to be loaded.
+- The copy APIs expect contiguous buffers and exact byte sizes; mismatches error out.
+- `call_tuple` does not accept `DLDataType`, `DLDevice`, `Option<String>`, or raw pointers;
+  use `Function::call_packed` with `AnyView` for these arguments.
+
+Example `call_packed` usage:
+
+```rust
+let alloc = tvm_ffi::Function::get_global("runtime.TVMTensorAllocWithScope")?;
+let shape = tvm_ffi::Shape::from(&[1, 512][..]);
+let mem_scope: Option<tvm_ffi::String> = None;
+let alloc_args = [
+    tvm_ffi::AnyView::from(&shape),
+    tvm_ffi::AnyView::from(&dtype),
+    tvm_ffi::AnyView::from(&device),
+    tvm_ffi::AnyView::from(&mem_scope),
+];
+let tensor_any = alloc.call_packed(&alloc_args)?;
+
+let copy_from = tvm_ffi::Function::get_global("runtime.TVMTensorCopyFromBytes")?;
+let copy_args = [
+    tvm_ffi::AnyView::from(&tensor),
+    tvm_ffi::AnyView::from(&host_ptr),
+    tvm_ffi::AnyView::from(&nbytes),
+];
+copy_from.call_packed(&copy_args)?;
 ```
 
 #### Non-Working APIs for Relax
