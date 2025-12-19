@@ -790,6 +790,7 @@ impl KokoroPipeline {
     }
 
     /// Initialize the Relax VM runtime by loading libtvm_runtime.
+    #[cfg(not(target_os = "ios"))]
     fn init_relax_runtime() -> Result<()> {
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -827,5 +828,11 @@ impl KokoroPipeline {
                 Ok(())
             }
         }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn init_relax_runtime() -> Result<()> {
+        // iOS disallows runtime dynamic loading; assume static registration.
+        Ok(())
     }
 }
