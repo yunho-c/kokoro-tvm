@@ -8,7 +8,10 @@ use crate::preprocessing::{build_alignment_with_pred, create_masks, pad_input_id
 use anyhow::Result;
 use ndarray::{s, Array1, Array2, Array3, ArrayD, ArrayView3};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::mem;
 use std::path::Path;
+use tvm_ffi::dtype::AsDLDataType;
 
 /// Helper macro to convert tvm_ffi::Error to anyhow::Error
 macro_rules! tvm_err {
@@ -52,40 +55,194 @@ fn extract_tensor_from_output(output: &tvm_ffi::Any, index: usize) -> Result<tvm
 
 /// Create a tensor with bool dtype from a slice of u8 values.
 /// TVM's bool dtype is kDLBool (code=6) with 8 bits.
-fn create_bool_tensor(data: &[u8], shape: &[i64]) -> Result<tvm_ffi::Tensor> {
-    use tvm_ffi::{CPUNDAlloc, DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, Tensor};
-    
+fn create_bool_tensor(
+    data: &[u8],
+    shape: &[i64],
+    device: tvm_ffi::DLDevice,
+) -> Result<tvm_ffi::Tensor> {
+    use tvm_ffi::{DLDataType, DLDataTypeCode};
+
     // Create bool dtype: kDLBool = 6, 8 bits, 1 lane
     let bool_dtype = DLDataType::new(DLDataTypeCode::kDLBool, 8, 1);
-    let device = DLDevice::new(DLDeviceType::kDLCPU, 0);
-    
-    // Allocate tensor with bool dtype
-    let mut tensor = Tensor::from_nd_alloc(CPUNDAlloc {}, shape, bool_dtype, device);
-    
-    // Verify size matches
-    let expected_size: usize = shape.iter().map(|&x| x as usize).product();
+    tensor_from_bytes(data, shape, bool_dtype, device)
+}
+
+fn tensor_alloc(
+    shape: &[i64],
+    dtype: tvm_ffi::DLDataType,
+    device: tvm_ffi::DLDevice,
+) -> Result<tvm_ffi::Tensor> {
+    use tvm_ffi::{CPUNDAlloc, DLDeviceType, Tensor};
+
+    if device.device_type == DLDeviceType::kDLCPU {
+        return Ok(Tensor::from_nd_alloc(CPUNDAlloc {}, shape, dtype, device));
+    }
+
+    let alloc = tvm_err!(
+        tvm_ffi::Function::get_global("runtime.TVMTensorAllocWithScope"),
+        "Failed to get runtime.TVMTensorAllocWithScope"
+    )?;
+    let shape_obj = tvm_ffi::Shape::from(shape);
+    let mem_scope: Option<tvm_ffi::String> = None;
+    let alloc_args = [
+        tvm_ffi::AnyView::from(&shape_obj),
+        tvm_ffi::AnyView::from(&dtype),
+        tvm_ffi::AnyView::from(&device),
+        tvm_ffi::AnyView::from(&mem_scope),
+    ];
+    let tensor_any = tvm_err!(
+        alloc.call_packed(&alloc_args),
+        "Failed to allocate device tensor"
+    )?;
+    tvm_err!(tensor_any.try_into(), "Failed to convert allocated tensor")
+}
+
+fn tensor_copy_from_bytes(
+    tensor: &tvm_ffi::Tensor,
+    data_ptr: *mut c_void,
+    nbytes: usize,
+) -> Result<()> {
+    let copy_from = tvm_err!(
+        tvm_ffi::Function::get_global("runtime.TVMTensorCopyFromBytes"),
+        "Failed to get runtime.TVMTensorCopyFromBytes"
+    )?;
+    let copy_args = [
+        tvm_ffi::AnyView::from(tensor),
+        tvm_ffi::AnyView::from(&data_ptr),
+        tvm_ffi::AnyView::from(&nbytes),
+    ];
+    tvm_err!(
+        copy_from.call_packed(&copy_args),
+        "Failed to copy data into tensor"
+    )?;
+    Ok(())
+}
+
+fn tensor_copy_to_bytes(
+    tensor: &tvm_ffi::Tensor,
+    data_ptr: *mut c_void,
+    nbytes: usize,
+) -> Result<()> {
+    let copy_to = tvm_err!(
+        tvm_ffi::Function::get_global("runtime.TVMTensorCopyToBytes"),
+        "Failed to get runtime.TVMTensorCopyToBytes"
+    )?;
+    let copy_args = [
+        tvm_ffi::AnyView::from(tensor),
+        tvm_ffi::AnyView::from(&data_ptr),
+        tvm_ffi::AnyView::from(&nbytes),
+    ];
+    tvm_err!(
+        copy_to.call_packed(&copy_args),
+        "Failed to copy data from tensor"
+    )?;
+    Ok(())
+}
+
+fn expected_nbytes(shape: &[i64], dtype: tvm_ffi::DLDataType) -> Result<usize> {
+    let numel: usize = shape
+        .iter()
+        .map(|&x| usize::try_from(x).map_err(|_| anyhow::anyhow!("Invalid shape dimension")))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .product();
+    let item_size = (dtype.bits as usize * dtype.lanes as usize + 7) / 8;
+    Ok(numel * item_size)
+}
+
+fn tensor_from_bytes(
+    data: &[u8],
+    shape: &[i64],
+    dtype: tvm_ffi::DLDataType,
+    device: tvm_ffi::DLDevice,
+) -> Result<tvm_ffi::Tensor> {
+    use tvm_ffi::DLDeviceType;
+
+    let expected_size = expected_nbytes(shape, dtype)?;
     if data.len() != expected_size {
         return Err(anyhow::anyhow!(
-            "Bool tensor size mismatch: expected {}, got {}",
+            "Tensor size mismatch: expected {}, got {}",
             expected_size,
             data.len()
         ));
     }
-    
-    // Copy data into the tensor (bool is stored as 8-bit)
-    // We need to use unsafe to access the raw data pointer
-    unsafe {
-        let dst = tensor.data_ptr_mut() as *mut u8;
-        std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+
+    let mut tensor = tensor_alloc(shape, dtype, device)?;
+    if device.device_type == DLDeviceType::kDLCPU {
+        unsafe {
+            let dst = tensor.data_ptr_mut() as *mut u8;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
+        return Ok(tensor);
     }
-    
+
+    tensor_copy_from_bytes(&tensor, data.as_ptr() as *mut c_void, data.len())?;
     Ok(tensor)
 }
 
-/// Convert a CPU tensor to an owned ndarray (f32).
+fn tensor_from_slice_device<T: AsDLDataType>(
+    slice: &[T],
+    shape: &[i64],
+    device: tvm_ffi::DLDevice,
+) -> Result<tvm_ffi::Tensor> {
+    use tvm_ffi::{DLDeviceType, Tensor};
+
+    let expected_len: usize = shape
+        .iter()
+        .map(|&x| usize::try_from(x).map_err(|_| anyhow::anyhow!("Invalid shape dimension")))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .product();
+    if slice.len() != expected_len {
+        return Err(anyhow::anyhow!(
+            "Tensor length mismatch: expected {}, got {}",
+            expected_len,
+            slice.len()
+        ));
+    }
+
+    if device.device_type == DLDeviceType::kDLCPU {
+        return tvm_err!(
+            Tensor::from_slice(slice, shape),
+            "Failed to create CPU tensor"
+        );
+    }
+
+    let dtype = T::DL_DATA_TYPE;
+    let tensor = tensor_alloc(shape, dtype, device)?;
+    let nbytes = slice.len() * mem::size_of::<T>();
+    tensor_copy_from_bytes(&tensor, slice.as_ptr() as *mut c_void, nbytes)?;
+    Ok(tensor)
+}
+
+fn tensor_to_vec_f32(tensor: &tvm_ffi::Tensor) -> Result<Vec<f32>> {
+    use tvm_ffi::{DLDataType, DLDataTypeCode, DLDeviceType};
+
+    let f32_dtype = DLDataType::new(DLDataTypeCode::kDLFloat, 32, 1);
+    if tensor.dtype() != f32_dtype {
+        return Err(anyhow::anyhow!(
+            "Tensor dtype mismatch: expected f32, got {:?}",
+            tensor.dtype()
+        ));
+    }
+
+    if tensor.device().device_type == DLDeviceType::kDLCPU {
+        return Ok(
+            tvm_err!(tensor.data_as_slice::<f32>(), "Failed to read tensor data")?.to_vec(),
+        );
+    }
+
+    let numel = tensor.numel();
+    let mut data = vec![0f32; numel];
+    let nbytes = numel * mem::size_of::<f32>();
+    tensor_copy_to_bytes(tensor, data.as_mut_ptr() as *mut c_void, nbytes)?;
+    Ok(data)
+}
+
+/// Convert a tensor to an owned ndarray (f32).
 fn tensor_to_array_d(tensor: &tvm_ffi::Tensor) -> Result<ArrayD<f32>> {
     let shape: Vec<usize> = tensor.shape().iter().map(|&dim| dim as usize).collect();
-    let data = tvm_err!(tensor.data_as_slice::<f32>(), "Failed to read tensor data")?.to_vec();
+    let data = tensor_to_vec_f32(tensor)?;
     ArrayD::from_shape_vec(shape, data)
         .map_err(|e| anyhow::anyhow!("Failed to reshape tensor data: {}", e))
 }
@@ -112,8 +269,7 @@ pub struct KokoroPipeline {
     vms: Vec<tvm_ffi::Module>,
 
     // Device info
-    #[allow(dead_code)]
-    device: String,
+    device: tvm_ffi::DLDevice,
 }
 
 /// Intermediate tensors captured from a forward pass.
@@ -144,14 +300,6 @@ impl KokoroPipeline {
     ///     lib_dir: Directory containing compiled .so/.dylib files
     ///     device: Target device ("llvm", "metal", "cuda")
     pub fn load(lib_dir: &Path, device: &str) -> Result<Self> {
-        // TODO: Implement end-to-end GPU inference (device tensor creation and host readback).
-        // CPU-only for now because we assume CPU-contiguous tensors for data_as_slice().
-        if device != "llvm" && device != "cpu" {
-            return Err(anyhow::anyhow!(
-                "CPU-only pipeline: unsupported device '{}'",
-                device
-            ));
-        }
         // Try to load libtvm_runtime to register Relax VM loader
         Self::init_relax_runtime()?;
 
@@ -167,6 +315,7 @@ impl KokoroPipeline {
 
         let device_type = Self::device_type_code(device);
         let device_id = 0i32;
+        let device = Self::device_from_str(device)?;
 
         // Load and wrap encoder modules
         let bert_path = lib_dir.join(format!("bert_compiled.{}", ext));
@@ -272,7 +421,7 @@ impl KokoroPipeline {
             decoder_fns,
             decoder_bucket_lens,
             vms,
-            device: device.to_string(),
+            device,
         })
     }
 
@@ -284,6 +433,23 @@ impl KokoroPipeline {
             "metal" => 8,         // kDLMetal = 8
             _ => 1,               // Default to CPU
         }
+    }
+
+    fn device_from_str(device: &str) -> Result<tvm_ffi::DLDevice> {
+        use tvm_ffi::DLDeviceType;
+
+        let device_type = match device {
+            "llvm" | "cpu" => DLDeviceType::kDLCPU,
+            "cuda" | "gpu" => DLDeviceType::kDLCUDA,
+            "metal" => DLDeviceType::kDLMetal,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported device '{}'",
+                    device
+                ))
+            }
+        };
+        Ok(tvm_ffi::DLDevice::new(device_type, 0))
     }
 
     /// Load a Relax module and extract a function via VirtualMachine.
@@ -394,6 +560,7 @@ impl KokoroPipeline {
         // --- Preprocessing ---
         let (input_ids_arr, cur_len) = pad_input_ids(input_ids, STATIC_TEXT_LEN);
         let (_text_mask, attention_mask) = create_masks(cur_len, STATIC_TEXT_LEN);
+        let device = self.device;
 
         // Style embeddings: s = ref_s[:, 128:], style_128 = ref_s[:, :128]
         let style_128: Vec<f32> = ref_s[..128].to_vec();
@@ -401,16 +568,18 @@ impl KokoroPipeline {
 
         // Convert to TVM tensors
         let input_ids_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(
+            tensor_from_slice_device(
                 input_ids_arr.as_slice().unwrap(),
                 &[1, STATIC_TEXT_LEN as i64],
+                device,
             ),
             "Failed to create input_ids tensor"
         )?;
         let attention_mask_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(
+            tensor_from_slice_device(
                 attention_mask.as_slice().unwrap(),
                 &[1, STATIC_TEXT_LEN as i64],
+                device,
             ),
             "Failed to create attention_mask tensor"
         )?;
@@ -428,11 +597,11 @@ impl KokoroPipeline {
 
         // --- Duration: d_en, s, lengths, mask -> (duration_logits, d) ---
         let s_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(&s, &[1, 128]),
+            tensor_from_slice_device(&s, &[1, 128], device),
             "Failed to create style tensor"
         )?;
         let lengths_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(&[cur_len as i64], &[1]),
+            tensor_from_slice_device(&[cur_len as i64], &[1], device),
             "Failed to create lengths tensor"
         )?;
 
@@ -441,7 +610,8 @@ impl KokoroPipeline {
         let text_mask_u8: Vec<u8> = (0..STATIC_TEXT_LEN)
             .map(|i| if i >= cur_len { 1u8 } else { 0u8 })
             .collect();
-        let text_mask_tvm = create_bool_tensor(&text_mask_u8, &[1, STATIC_TEXT_LEN as i64])?;
+        let text_mask_tvm =
+            create_bool_tensor(&text_mask_u8, &[1, STATIC_TEXT_LEN as i64], device)?;
 
         let duration_out = tvm_err!(
             self.f_duration
@@ -467,11 +637,15 @@ impl KokoroPipeline {
 
         // --- F0N: en, s, frame_lengths -> (F0, N) ---
         let en_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(en.as_slice().unwrap(), &[1, 640, STATIC_AUDIO_LEN as i64]),
+            tensor_from_slice_device(
+                en.as_slice().unwrap(),
+                &[1, 640, STATIC_AUDIO_LEN as i64],
+                device,
+            ),
             "Failed to create en tensor"
         )?;
         let frame_lengths_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(&[actual_audio_len as i64], &[1]),
+            tensor_from_slice_device(&[actual_audio_len as i64], &[1], device),
             "Failed to create frame_lengths tensor"
         )?;
 
@@ -520,19 +694,31 @@ impl KokoroPipeline {
         let n_b = n_np.slice(s![.., ..expected_f0_len]).to_owned();
 
         let asr_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(asr_b.as_slice().unwrap(), &[1, 512, bucket_len as i64]),
+            tensor_from_slice_device(
+                asr_b.as_slice().unwrap(),
+                &[1, 512, bucket_len as i64],
+                device,
+            ),
             "Failed to create asr tensor"
         )?;
         let f0_b_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(f0_b.as_slice().unwrap(), &[1, (bucket_len * 2) as i64]),
+            tensor_from_slice_device(
+                f0_b.as_slice().unwrap(),
+                &[1, (bucket_len * 2) as i64],
+                device,
+            ),
             "Failed to create f0 tensor"
         )?;
         let n_b_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(n_b.as_slice().unwrap(), &[1, (bucket_len * 2) as i64]),
+            tensor_from_slice_device(
+                n_b.as_slice().unwrap(),
+                &[1, (bucket_len * 2) as i64],
+                device,
+            ),
             "Failed to create n tensor"
         )?;
         let style_128_tvm = tvm_err!(
-            tvm_ffi::Tensor::from_slice(&style_128, &[1, 128]),
+            tensor_from_slice_device(&style_128, &[1, 128], device),
             "Failed to create style_128 tensor"
         )?;
 
@@ -546,8 +732,7 @@ impl KokoroPipeline {
             "Decoder forward failed"
         )?;
         let audio_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&audio_out, 0)?;
-        let audio_data =
-            tvm_err!(audio_tvm.data_as_slice::<f32>(), "Failed to read audio tensor")?;
+        let audio_data = tensor_to_vec_f32(&audio_tvm)?;
 
         let target_samples = actual_audio_len * SAMPLES_PER_FRAME;
         let trim_len = target_samples.min(audio_data.len());
