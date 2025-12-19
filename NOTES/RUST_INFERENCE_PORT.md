@@ -69,11 +69,13 @@ const SAMPLES_PER_FRAME: usize = 600;  // For audio trimming
 
 | Module | Function | Inputs | Outputs |
 |--------|----------|--------|---------|
-| bert_compiled | `bert_forward` | `(input_ids[1,512], attention_mask[1,512])` | `d_en[1,512,512]` |
-| duration_compiled | `duration_forward` | `(d_en, style[1,128], lengths[1], mask[1,512])` | `(duration[1,512,bins], d[1,512,640])` |
-| f0n_compiled | `f0n_forward` | `(en[1,640,audio_len], style[1,128], frame_lengths[1])` | `(F0[1,audio_len*2], N[1,audio_len*2])` |
+| bert_compiled | `bert_forward` | `(input_ids[1,512] int64, attention_mask[1,512] int64)` | `Array(d_en[1,512,512] float32)` |
+| duration_compiled | `duration_forward` | `(d_en, style[1,128] float32, lengths[1] int64, mask[1,512] **bool**)` | `(duration[1,512,bins], d[1,512,640])` |
+| f0n_compiled | `f0n_forward` | `(en[1,640,audio_len], style[1,128])` | `(F0[1,audio_len*2], N[1,audio_len*2])` |
 | text_encoder_compiled | `text_encoder_forward` | `(input_ids[1,512], lengths[1], mask[1,512])` | `t_en[1,512,512]` |
 | decoder_compiled | `decoder_forward` | `(asr[1,512,audio_len], F0[1,audio_len*2], N[1,audio_len*2], style[1,128])` | `audio[1,audio_len*600]` |
+
+> **Important**: The `mask` parameter for duration_forward expects `dtype=bool`, not `int8`. This is a common source of errors.
 
 ## Alignment Algorithm (Pure Rust Implementation)
 
@@ -167,3 +169,86 @@ def convert_voice_pack(pt_path: str, npy_path: str):
 - Native SIMD via ndarray
 - Direct TVM FFI calls without Python wrapper
 - Potential for async/parallel module loading
+
+## Relax VM Integration (Rust)
+
+### Initialization Sequence
+
+The `tvm-ffi` crate does **not** expose a high-level `VirtualMachine` wrapper. You must manually invoke the VM functions:
+
+```rust
+// 1. Load the compiled library
+let lib = Module::load_from_file("bert_compiled.so")?;
+
+// 2. Get and call vm_load_executable (returns Executable module)
+let vm_load_exec = lib.get_function("vm_load_executable")?;
+let exec_module: Module = vm_load_exec.call_tuple(())?.try_into()?;
+
+// 3. Initialize the VM with devices and allocator
+let vm_init = exec_module.get_function("vm_initialization")?;
+vm_init.call_tuple((device_type, device_id, POOLED_ALLOCATOR))?;
+
+// 4. Get entry point function
+let func = exec_module.get_function("bert_forward")?;
+```
+
+**Allocator Types:**
+- `NAIVE_ALLOCATOR = 1` - Simple malloc/free (slow)
+- `POOLED_ALLOCATOR = 2` - Memory pool (recommended)
+
+### Handling Array Outputs
+
+Relax functions often return `ffi.Array` (tuples) instead of single tensors. Use `ffi.ArrayGetItem` to extract elements:
+
+```rust
+fn extract_tensor_from_output(output: tvm_ffi::Any, index: usize) -> Result<Tensor> {
+    if output.type_index() == TypeIndex::kTVMFFITensor as i32 {
+        // Direct tensor
+        return output.try_into();
+    }
+    // Array - extract element
+    let array_get_item = Function::get_global("ffi.ArrayGetItem")?;
+    let output_view = AnyView::from(&output);
+    let args = [output_view, AnyView::from(&(index as i64))];
+    let element = array_get_item.call_packed(&args)?;
+    element.try_into()
+}
+```
+
+### Runtime Library Requirements
+
+```bash
+export DYLD_LIBRARY_PATH="/path/to/tvm-ffi/build/lib:/path/to/tvm/build:$DYLD_LIBRARY_PATH"
+```
+
+Both `libtvm_ffi.dylib` (FFI layer) and `libtvm.dylib` (runtime with Relax VM) must be loadable.
+
+## Known Issues
+
+### 1. `ffi.Array` vs `ffi.Tensor`
+
+**Error**: `TypeError: Cannot convert from type 'ffi.Array' to 'ffi.Tensor'`
+
+**Cause**: Relax functions often return tuples/arrays of outputs.
+
+**Solution**: Use `ffi.ArrayGetItem(array, index)` to extract individual tensors.
+
+### 2. dtype Mismatch: `bool` vs `int8`
+
+**Error**: `expect Tensor with dtype bool but get int8`
+
+**Cause**: Rust `i8` is not the same as TVM's `bool` dtype.
+
+**Solution**: Create tensors with explicit bool dtype:
+```rust
+// NOT: tvm_ffi::Tensor::from_slice(&[0i8, 1i8, ...], shape)
+// Instead, create with bool dtype (requires custom allocation)
+```
+
+### 3. `relax.VirtualMachine` Not Found
+
+**Error**: `Failed to get relax.VirtualMachine from registry`
+
+**Cause**: `tvm-ffi` has a separate global function registry from `libtvm_runtime`.
+
+**Solution**: Use module-level `vm_load_executable` instead of global functions.

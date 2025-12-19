@@ -1,7 +1,7 @@
 //! Voice pack loading and style selection.
 
 use anyhow::{Context, Result};
-use ndarray::{Array2, s};
+use ndarray::{s, Array2, Array3, ArrayD};
 use ndarray_npy::ReadNpyExt;
 use std::fs::File;
 use std::path::Path;
@@ -17,18 +17,51 @@ pub struct VoicePack {
 impl VoicePack {
     /// Load a voice pack from a .npy file.
     ///
-    /// The file should contain a float32 array of shape `[N, 256]`.
+    /// Handles both 2D `[N, 256]` and 3D `[N, 1, 256]` arrays (squeezes middle dim).
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).context("Failed to open voice pack file")?;
-        let data: Array2<f32> =
-            Array2::read_npy(file).context("Failed to read voice pack .npy")?;
+
+        // Try to load as dynamic array first to handle different shapes
+        let data_dyn: ArrayD<f32> =
+            ArrayD::read_npy(file).context("Failed to read voice pack .npy")?;
+
+        let shape = data_dyn.shape();
+
+        // Handle different shapes
+        let data: Array2<f32> = match shape.len() {
+            2 => {
+                // Already 2D: [N, 256]
+                data_dyn
+                    .into_dimensionality()
+                    .context("Failed to convert to 2D array")?
+            }
+            3 => {
+                // 3D: [N, 1, 256] - squeeze middle dimension
+                if shape[1] != 1 {
+                    anyhow::bail!(
+                        "3D voice pack should have shape [N, 1, 256], got {:?}",
+                        shape
+                    );
+                }
+                let arr3: Array3<f32> = data_dyn
+                    .into_dimensionality()
+                    .context("Failed to convert to 3D array")?;
+                // Remove axis 1 to get [N, 256]
+                arr3.index_axis_move(ndarray::Axis(1), 0)
+            }
+            _ => {
+                anyhow::bail!(
+                    "Voice pack must be 2D [N, 256] or 3D [N, 1, 256], got shape {:?}",
+                    shape
+                );
+            }
+        };
 
         if data.ncols() != 256 {
-            anyhow::bail!(
-                "Voice pack must have 256 columns, got {}",
-                data.ncols()
-            );
+            anyhow::bail!("Voice pack must have 256 columns, got {}", data.ncols());
         }
+
+        println!("  Loaded voice pack: {} entries, shape {:?}", data.nrows(), data.shape());
 
         Ok(Self { data })
     }
