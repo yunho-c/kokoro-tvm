@@ -26,6 +26,9 @@ hound = "3.5"
 # Error handling
 anyhow = "1.0"
 
+# Dynamic library loading
+libloading = "0.8"
+
 [[bin]]
 name = "kokoro-tvm"
 path = "src/main.rs"
