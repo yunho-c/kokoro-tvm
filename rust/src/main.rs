@@ -5,6 +5,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use kokoro_tvm::{constants::SAMPLE_RATE, save_wav, KokoroPipeline, Vocab, VoicePack};
+use kokoro_tvm::validation::{GoldenTensors, validate_against_golden, save_tensors};
 
 #[derive(Parser, Debug)]
 #[command(name = "kokoro-tvm")]
@@ -37,6 +38,14 @@ struct Args {
     /// Target device: llvm, metal, or cuda
     #[arg(long, default_value = "llvm")]
     device: String,
+
+    /// Directory containing golden tensors from Python for validation
+    #[arg(long)]
+    golden_dir: Option<PathBuf>,
+
+    /// Save intermediate tensors to this directory for inspection
+    #[arg(long)]
+    save_tensors: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -76,6 +85,32 @@ fn main() -> Result<()> {
 
     let duration_secs = audio.len() as f32 / SAMPLE_RATE as f32;
     println!("Done! Generated {:.2}s of audio.", duration_secs);
+
+    // Save tensors if requested
+    if let Some(ref tensor_dir) = args.save_tensors {
+        println!();
+        save_tensors(
+            tensor_dir,
+            &input_ids,
+            ref_s.as_slice().unwrap(),
+            args.speed,
+            &audio,
+        ).context("Failed to save tensors")?;
+    }
+
+    // Run validation if golden tensors provided
+    if let Some(ref golden_dir) = args.golden_dir {
+        println!();
+        let golden = GoldenTensors::load(golden_dir)
+            .context("Failed to load golden tensors")?;
+        
+        let passed = validate_against_golden(&golden, &audio)
+            .context("Validation failed")?;
+        
+        if !passed {
+            std::process::exit(1);
+        }
+    }
 
     Ok(())
 }

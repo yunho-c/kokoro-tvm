@@ -3,10 +3,11 @@
 //! A Rust library for running Kokoro TTS inference using TVM-compiled modules.
 
 mod audio;
-mod pipeline;
-mod preprocessing;
-mod vocab;
-mod voice;
+pub mod pipeline;
+pub mod preprocessing;
+pub mod validation;
+pub mod vocab;
+pub mod voice;
 
 pub use audio::save_wav;
 pub use pipeline::KokoroPipeline;
