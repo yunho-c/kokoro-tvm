@@ -75,7 +75,7 @@ fn create_bool_tensor(data: &[u8], shape: &[i64]) -> Result<tvm_ffi::Tensor> {
     // Copy data into the tensor (bool is stored as 8-bit)
     // We need to use unsafe to access the raw data pointer
     unsafe {
-        let dst = tensor.data_ptr() as *mut u8;
+        let dst = tensor.data_ptr_mut() as *mut u8;
         std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
     }
     
@@ -128,6 +128,14 @@ impl KokoroPipeline {
     ///     lib_dir: Directory containing compiled .so/.dylib files
     ///     device: Target device ("llvm", "metal", "cuda")
     pub fn load(lib_dir: &Path, device: &str) -> Result<Self> {
+        // TODO: Implement end-to-end GPU inference (device tensor creation and host readback).
+        // CPU-only for now because we assume CPU-contiguous tensors for data_as_slice().
+        if device != "llvm" && device != "cpu" {
+            return Err(anyhow::anyhow!(
+                "CPU-only pipeline: unsupported device '{}'",
+                device
+            ));
+        }
         // Try to load libtvm_runtime to register Relax VM loader
         Self::init_relax_runtime()?;
 
@@ -356,6 +364,12 @@ impl KokoroPipeline {
     /// Returns:
     ///     Audio samples as Vec<f32>
     pub fn forward(&self, input_ids: &[i64], ref_s: &[f32], speed: f32) -> Result<Vec<f32>> {
+        if ref_s.len() < 256 {
+            return Err(anyhow::anyhow!(
+                "ref_s must have at least 256 elements, got {}",
+                ref_s.len()
+            ));
+        }
         // --- Preprocessing ---
         let (input_ids_arr, cur_len) = pad_input_ids(input_ids, STATIC_TEXT_LEN);
         let (_text_mask, attention_mask) = create_masks(cur_len, STATIC_TEXT_LEN);
@@ -464,10 +478,21 @@ impl KokoroPipeline {
 
         // --- Decoder: asr, F0, N, style[:128] -> audio ---
         let bucket_len = self.select_decoder_bucket(actual_audio_len);
+        let expected_f0_len = bucket_len * 2;
+        let f0_len = f0_np.shape().get(1).copied().unwrap_or(0);
+        let n_len = n_np.shape().get(1).copied().unwrap_or(0);
+        if f0_len < expected_f0_len || n_len < expected_f0_len {
+            return Err(anyhow::anyhow!(
+                "F0/N length mismatch: expected {}, got f0={} n={}",
+                expected_f0_len,
+                f0_len,
+                n_len
+            ));
+        }
 
         let asr_b = asr.slice(s![.., .., ..bucket_len]).to_owned();
-        let f0_b = f0_np.slice(s![.., ..bucket_len * 2]).to_owned();
-        let n_b = n_np.slice(s![.., ..bucket_len * 2]).to_owned();
+        let f0_b = f0_np.slice(s![.., ..expected_f0_len]).to_owned();
+        let n_b = n_np.slice(s![.., ..expected_f0_len]).to_owned();
 
         let asr_tvm = tvm_err!(
             tvm_ffi::Tensor::from_slice(asr_b.as_slice().unwrap(), &[1, 512, bucket_len as i64]),
