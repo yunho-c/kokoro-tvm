@@ -4,9 +4,9 @@
 //! has API limitations that need to be addressed before full functionality.
 
 use crate::constants::{SAMPLES_PER_FRAME, STATIC_AUDIO_LEN, STATIC_TEXT_LEN};
-use crate::preprocessing::{build_alignment, create_masks, pad_input_ids};
+use crate::preprocessing::{build_alignment_with_pred, create_masks, pad_input_ids};
 use anyhow::Result;
-use ndarray::{s, Array2, Array3, ArrayD};
+use ndarray::{s, Array1, Array2, Array3, ArrayD, ArrayView3};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -60,7 +60,7 @@ fn create_bool_tensor(data: &[u8], shape: &[i64]) -> Result<tvm_ffi::Tensor> {
     let device = DLDevice::new(DLDeviceType::kDLCPU, 0);
     
     // Allocate tensor with bool dtype
-    let tensor = Tensor::from_nd_alloc(CPUNDAlloc {}, shape, bool_dtype, device);
+    let mut tensor = Tensor::from_nd_alloc(CPUNDAlloc {}, shape, bool_dtype, device);
     
     // Verify size matches
     let expected_size: usize = shape.iter().map(|&x| x as usize).product();
@@ -114,6 +114,22 @@ pub struct KokoroPipeline {
     // Device info
     #[allow(dead_code)]
     device: String,
+}
+
+/// Intermediate tensors captured from a forward pass.
+pub struct PipelineTrace {
+    pub audio: Vec<f32>,
+    pub cur_len: usize,
+    pub frames: usize,
+    pub d_en: Array3<f32>,
+    pub duration_logits: ArrayD<f32>,
+    pub d: Array3<f32>,
+    pub pred_dur: Array1<i64>,
+    pub f0: Array2<f32>,
+    pub n: Array2<f32>,
+    pub t_en: Array3<f32>,
+    pub asr: Array3<f32>,
+    pub decoder_bucket_len: usize,
 }
 
 // Allocator type constants (matching Python VirtualMachine class)
@@ -362,8 +378,13 @@ impl KokoroPipeline {
     ///     speed: Speech speed multiplier (1.0 = normal)
     ///
     /// Returns:
-    ///     Audio samples as Vec<f32>
-    pub fn forward(&self, input_ids: &[i64], ref_s: &[f32], speed: f32) -> Result<Vec<f32>> {
+    ///     Intermediate tensors including the final audio samples
+    pub fn forward_trace(
+        &self,
+        input_ids: &[i64],
+        ref_s: &[f32],
+        speed: f32,
+    ) -> Result<PipelineTrace> {
         if ref_s.len() < 256 {
             return Err(anyhow::anyhow!(
                 "ref_s must have at least 256 elements, got {}",
@@ -401,6 +422,9 @@ impl KokoroPipeline {
         )?;
         // BERT returns a tuple, extract the first element (d_en)
         let d_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&bert_out, 0)?;
+        let d_en: Array3<f32> = tensor_to_array_d(&d_en_tvm)?
+            .into_dimensionality()
+            .map_err(|e| anyhow::anyhow!("Expected BERT output to be 3D: {}", e))?;
 
         // --- Duration: d_en, s, lengths, mask -> (duration_logits, d) ---
         let s_tvm = tvm_err!(
@@ -434,11 +458,12 @@ impl KokoroPipeline {
             .map_err(|e| anyhow::anyhow!("Expected duration output to be 3D: {}", e))?;
 
         // --- Alignment computation ---
-        let (full_aln, actual_audio_len) = build_alignment(&duration_logits, cur_len, speed);
+        let (full_aln, actual_audio_len, pred_dur) =
+            build_alignment_with_pred(&duration_logits, cur_len, speed);
 
         // Compute en = d.T @ alignment
-        let d_transposed = d_np.permuted_axes([0, 2, 1]);
-        let en = Self::matmul_3d(&d_transposed, &full_aln);
+        let d_transposed = d_np.view().permuted_axes([0, 2, 1]);
+        let en = Self::matmul_3d(&d_transposed, &full_aln.view());
 
         // --- F0N: en, s, frame_lengths -> (F0, N) ---
         let en_tvm = tvm_err!(
@@ -474,7 +499,7 @@ impl KokoroPipeline {
             .into_dimensionality()
             .map_err(|e| anyhow::anyhow!("Expected text encoder output to be 3D: {}", e))?;
 
-        let asr = Self::matmul_3d(&t_en, &full_aln);
+        let asr = Self::matmul_3d(&t_en.view(), &full_aln.view());
 
         // --- Decoder: asr, F0, N, style[:128] -> audio ---
         let bucket_len = self.select_decoder_bucket(actual_audio_len);
@@ -528,12 +553,38 @@ impl KokoroPipeline {
         let trim_len = target_samples.min(audio_data.len());
         let audio = audio_data[..trim_len].to_vec();
 
-        Ok(audio)
+        Ok(PipelineTrace {
+            audio,
+            cur_len,
+            frames: actual_audio_len,
+            d_en,
+            duration_logits,
+            d: d_np,
+            pred_dur,
+            f0: f0_np,
+            n: n_np,
+            t_en,
+            asr,
+            decoder_bucket_len: bucket_len,
+        })
+    }
+
+    /// Run full inference.
+    ///
+    /// Args:
+    ///     input_ids: Token IDs (including start/end tokens)
+    ///     ref_s: Style embedding [256] (flat slice from the [1, 256] array)
+    ///     speed: Speech speed multiplier (1.0 = normal)
+    ///
+    /// Returns:
+    ///     Audio samples as Vec<f32>
+    pub fn forward(&self, input_ids: &[i64], ref_s: &[f32], speed: f32) -> Result<Vec<f32>> {
+        Ok(self.forward_trace(input_ids, ref_s, speed)?.audio)
     }
 
     /// Batch matrix multiplication for 3D arrays.
     /// [1, M, K] @ [1, K, N] -> [1, M, N]
-    fn matmul_3d(a: &Array3<f32>, b: &Array3<f32>) -> Array3<f32> {
+    fn matmul_3d(a: &ArrayView3<f32>, b: &ArrayView3<f32>) -> Array3<f32> {
         let m = a.shape()[1];
         let n = b.shape()[2];
         let k = a.shape()[2];

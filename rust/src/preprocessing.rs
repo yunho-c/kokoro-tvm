@@ -55,11 +55,11 @@ pub fn create_masks(cur_len: usize, static_len: usize) -> (Array2<bool>, Array2<
 /// Returns:
 ///     - full_aln: [1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN] alignment matrix
 ///     - actual_audio_len: Number of frames actually used
-pub fn build_alignment(
+pub fn build_alignment_with_pred(
     duration_logits: &ArrayD<f32>,
     cur_len: usize,
     speed: f32,
-) -> (Array3<f32>, usize) {
+) -> (Array3<f32>, usize, Array1<i64>) {
     // Apply sigmoid and sum over bins dimension
     let probs = sigmoid(&duration_logits.view());
 
@@ -101,6 +101,16 @@ pub fn build_alignment(
         }
     }
 
+    (full_aln, actual_audio_len, Array1::from(pred_dur))
+}
+
+pub fn build_alignment(
+    duration_logits: &ArrayD<f32>,
+    cur_len: usize,
+    speed: f32,
+) -> (Array3<f32>, usize) {
+    let (full_aln, actual_audio_len, _pred_dur) =
+        build_alignment_with_pred(duration_logits, cur_len, speed);
     (full_aln, actual_audio_len)
 }
 

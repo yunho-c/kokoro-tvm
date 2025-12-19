@@ -10,8 +10,8 @@ pub mod vocab;
 pub mod voice;
 
 pub use audio::save_wav;
-pub use pipeline::KokoroPipeline;
-pub use preprocessing::{build_alignment, create_masks, pad_input_ids, sigmoid};
+pub use pipeline::{KokoroPipeline, PipelineTrace};
+pub use preprocessing::{build_alignment, build_alignment_with_pred, create_masks, pad_input_ids, sigmoid};
 pub use vocab::Vocab;
 pub use voice::VoicePack;
 

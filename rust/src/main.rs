@@ -5,7 +5,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use kokoro_tvm::{constants::SAMPLE_RATE, save_wav, KokoroPipeline, Vocab, VoicePack};
-use kokoro_tvm::validation::{GoldenTensors, validate_against_golden, save_tensors};
+use kokoro_tvm::validation::{save_trace_tensors, GoldenTensors, validate_against_golden};
 
 #[derive(Parser, Debug)]
 #[command(name = "kokoro-tvm")]
@@ -75,26 +75,26 @@ fn main() -> Result<()> {
         .context("Failed to load TVM pipeline")?;
 
     println!("Running inference (speed={})...", args.speed);
-    let audio = pipeline
-        .forward(&input_ids, ref_s.as_slice().unwrap(), args.speed)
+    let trace = pipeline
+        .forward_trace(&input_ids, ref_s.as_slice().unwrap(), args.speed)
         .context("Inference failed")?;
 
     // Save audio
     println!("Saving audio to {:?}...", args.output);
-    save_wav(&audio, &args.output, SAMPLE_RATE).context("Failed to save WAV")?;
+    save_wav(&trace.audio, &args.output, SAMPLE_RATE).context("Failed to save WAV")?;
 
-    let duration_secs = audio.len() as f32 / SAMPLE_RATE as f32;
+    let duration_secs = trace.audio.len() as f32 / SAMPLE_RATE as f32;
     println!("Done! Generated {:.2}s of audio.", duration_secs);
 
     // Save tensors if requested
     if let Some(ref tensor_dir) = args.save_tensors {
         println!();
-        save_tensors(
+        save_trace_tensors(
             tensor_dir,
             &input_ids,
             ref_s.as_slice().unwrap(),
             args.speed,
-            &audio,
+            &trace,
         ).context("Failed to save tensors")?;
     }
 
@@ -104,7 +104,7 @@ fn main() -> Result<()> {
         let golden = GoldenTensors::load(golden_dir)
             .context("Failed to load golden tensors")?;
         
-        let passed = validate_against_golden(&golden, &audio)
+        let passed = validate_against_golden(&golden, &trace)
             .context("Validation failed")?;
         
         if !passed {
