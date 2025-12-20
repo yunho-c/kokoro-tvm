@@ -37,6 +37,15 @@ pub struct SynthesisResult {
     pub sample_rate: u32,
 }
 
+#[derive(Clone, Debug)]
+pub struct RuntimeStatus {
+    pub initialized: bool,
+    pub device: Option<String>,
+    pub artifacts_dir: Option<PathBuf>,
+    pub vocab_path: Option<PathBuf>,
+    pub voice_path: Option<PathBuf>,
+}
+
 enum RuntimeCommand {
     Init {
         config: RuntimeConfig,
@@ -51,12 +60,16 @@ enum RuntimeCommand {
         voice_index: Option<usize>,
         reply: mpsc::Sender<Result<SynthesisResult, String>>,
     },
+    Status {
+        reply: mpsc::Sender<Result<RuntimeStatus, String>>,
+    },
     Reset {
         reply: mpsc::Sender<Result<(), String>>,
     },
 }
 
 struct RuntimeWorker {
+    config: Option<RuntimeConfig>,
     pipeline: Option<KokoroPipeline>,
     vocab: Option<Vocab>,
     voice_pack: Option<VoicePack>,
@@ -65,6 +78,7 @@ struct RuntimeWorker {
 impl RuntimeWorker {
     fn new() -> Self {
         Self {
+            config: None,
             pipeline: None,
             vocab: None,
             voice_pack: None,
@@ -80,6 +94,7 @@ impl RuntimeWorker {
         )
         .context("Failed to load TVM pipeline")?;
 
+        self.config = Some(config);
         self.pipeline = Some(pipeline);
         self.vocab = Some(vocab);
         self.voice_pack = Some(voice_pack);
@@ -91,7 +106,23 @@ impl RuntimeWorker {
             anyhow::bail!("Runtime is not initialized");
         }
 
-        // TODO: run a short inference to prime kernels and allocator state.
+        let vocab = self.vocab.as_ref().context("Runtime is not initialized")?;
+        let voice_pack = self
+            .voice_pack
+            .as_ref()
+            .context("Runtime is not initialized")?;
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .context("Runtime is not initialized")?;
+
+        let phonemes = "a";
+        let input_ids = vocab.encode(phonemes);
+        let ref_s = voice_pack.select_style_by_index(0)?;
+        let ref_s_slice = ref_s
+            .as_slice()
+            .context("Style embedding must be contiguous")?;
+        let _ = pipeline.forward(&input_ids, ref_s_slice, 1.0)?;
         Ok(())
     }
 
@@ -130,10 +161,22 @@ impl RuntimeWorker {
     }
 
     fn reset(&mut self) -> Result<()> {
+        self.config = None;
         self.pipeline = None;
         self.vocab = None;
         self.voice_pack = None;
         Ok(())
+    }
+
+    fn status(&self) -> RuntimeStatus {
+        let config = self.config.as_ref();
+        RuntimeStatus {
+            initialized: self.pipeline.is_some(),
+            device: config.map(|cfg| cfg.device.clone()),
+            artifacts_dir: config.map(|cfg| cfg.artifacts_dir.clone()),
+            vocab_path: config.map(|cfg| cfg.vocab_path.clone()),
+            voice_path: config.map(|cfg| cfg.voice_path.clone()),
+        }
     }
 }
 
@@ -169,6 +212,10 @@ impl RuntimeHandle {
                     }
                     RuntimeCommand::Reset { reply } => {
                         let result = worker.reset().map_err(|err| err.to_string());
+                        let _ = reply.send(result);
+                    }
+                    RuntimeCommand::Status { reply } => {
+                        let result = Ok(worker.status());
                         let _ = reply.send(result);
                     }
                 }
@@ -254,5 +301,15 @@ pub fn shutdown() -> Result<()> {
         .tx
         .send(RuntimeCommand::Reset { reply: reply_tx })
         .context("Failed to send shutdown request")?;
+    recv_result(reply_rx)
+}
+
+pub fn status() -> Result<RuntimeStatus> {
+    let handle = runtime_handle()?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    handle
+        .tx
+        .send(RuntimeCommand::Status { reply: reply_tx })
+        .context("Failed to send status request")?;
     recv_result(reply_rx)
 }

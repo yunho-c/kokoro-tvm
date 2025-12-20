@@ -21,8 +21,10 @@ pub use runtime::{
     shutdown,
     synthesize,
     synthesize_with_voice_index,
+    status,
     warmup,
     RuntimeConfig,
+    RuntimeStatus,
     SynthesisResult,
 };
 #[cfg(feature = "frb")]

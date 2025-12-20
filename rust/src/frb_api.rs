@@ -1,7 +1,7 @@
 //! Flutter Rust Bridge exports.
 
 use crate::runtime;
-use crate::SynthesisResult;
+use crate::{RuntimeStatus, SynthesisResult};
 
 #[flutter_rust_bridge::frb]
 pub fn frb_init(
@@ -38,4 +38,9 @@ pub fn frb_synthesize_with_voice_index(
 #[flutter_rust_bridge::frb]
 pub fn frb_shutdown() -> Result<(), String> {
     runtime::shutdown().map_err(|err| err.to_string())
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_status() -> Result<RuntimeStatus, String> {
+    runtime::status().map_err(|err| err.to_string())
 }

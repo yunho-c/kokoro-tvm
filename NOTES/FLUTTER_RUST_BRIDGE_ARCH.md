@@ -41,6 +41,7 @@ flowchart TD
 | `init(config)` | Create singleton, set device, artifact root, and cache. | Call once at startup. |
 | `synthesize(text, voice_id, speed)` | Run inference and return audio bytes or f32 frames. | Non-blocking; uses cached pipeline. |
 | `warmup()` | Optional warmup pass to compile kernels and allocate buffers. | Run after init on startup. |
+| `status()` | Return runtime status and configuration paths. | Helpful for diagnostics. |
 | `shutdown()` | Release pipeline and caches. | Optional for memory pressure. |
 | `set_device(device)` | Switch device or rebuild pipeline. | Likely requires re-init. |
 
@@ -84,8 +85,18 @@ flowchart TD
 - App start:
   - `init(config)`
   - `warmup()`
+- Periodic diagnostics:
+  - `status()`
 - User taps “Speak”:
   - `synthesize(text, voice_id, speed)`
+
+## Dart Example (Status)
+```dart
+final status = await api.frbStatus();
+print('Initialized: ${status.initialized}');
+print('Device: ${status.device}');
+print('Artifacts: ${status.artifactsDir}');
+```
 - App background:
   - keep in memory or call `shutdown()` on low memory
 
