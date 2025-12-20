@@ -29,6 +29,9 @@ anyhow = "1.0"
 # Dynamic library loading
 libloading = "0.8"
 
+# Flutter Rust Bridge (optional)
+flutter_rust_bridge = { version = "2.5", optional = true }
+
 [[bin]]
 name = "kokoro-tvm"
 path = "src/main.rs"
@@ -36,3 +39,7 @@ path = "src/main.rs"
 [lib]
 name = "kokoro_tvm"
 path = "src/lib.rs"
+
+[features]
+default = []
+frb = ["flutter_rust_bridge"]

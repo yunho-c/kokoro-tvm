@@ -82,6 +82,25 @@ impl VoicePack {
         row.insert_axis(ndarray::Axis(0)).to_owned()
     }
 
+    /// Select a style embedding by explicit index.
+    ///
+    /// Returns a `[1, 256]` array containing the selected style embedding.
+    pub fn select_style_by_index(&self, index: usize) -> Result<Array2<f32>> {
+        if self.data.is_empty() {
+            anyhow::bail!("Voice pack is empty");
+        }
+        if index >= self.data.nrows() {
+            anyhow::bail!(
+                "Voice index {} out of range (max {})",
+                index,
+                self.data.nrows().saturating_sub(1)
+            );
+        }
+
+        let row = self.data.slice(s![index, ..]);
+        Ok(row.insert_axis(ndarray::Axis(0)).to_owned())
+    }
+
     /// Get the number of style entries in this voice pack.
     pub fn len(&self) -> usize {
         self.data.nrows()
