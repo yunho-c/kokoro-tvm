@@ -10,7 +10,7 @@ use ndarray::{s, Array1, Array2, Array3, ArrayD, ArrayView3};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tvm_ffi::dtype::AsDLDataType;
 
 /// Helper macro to convert tvm_ffi::Error to anyhow::Error
@@ -294,6 +294,84 @@ const POOLED_ALLOCATOR: i32 = 2;
 
 
 impl KokoroPipeline {
+    fn artifact_extension(device: &str) -> &'static str {
+        if cfg!(target_os = "macos") {
+            if device == "metal" {
+                "dylib"
+            } else {
+                "so"
+            }
+        } else {
+            "so"
+        }
+    }
+
+    fn required_artifact_paths(base_dir: &Path, ext: &str) -> Vec<PathBuf> {
+        vec![
+            base_dir.join(format!("bert_compiled.{}", ext)),
+            base_dir.join(format!("duration_compiled.{}", ext)),
+            base_dir.join(format!("f0n_compiled.{}", ext)),
+            base_dir.join(format!("text_encoder_compiled.{}", ext)),
+        ]
+    }
+
+    fn missing_required_artifacts(base_dir: &Path, ext: &str) -> Vec<PathBuf> {
+        Self::required_artifact_paths(base_dir, ext)
+            .into_iter()
+            .filter(|path| !path.exists())
+            .collect()
+    }
+
+    fn candidate_artifact_dirs(base_dir: &Path) -> Vec<PathBuf> {
+        let base_dir = if base_dir.is_file() {
+            base_dir.parent().unwrap_or(base_dir).to_path_buf()
+        } else {
+            base_dir.to_path_buf()
+        };
+        let mut candidates = vec![
+            base_dir.clone(),
+            base_dir.join("tvm_output"),
+            base_dir.join("Resources"),
+            base_dir.join("Resources").join("tvm_output"),
+            base_dir.join("Contents").join("Resources"),
+            base_dir.join("Contents").join("Resources").join("tvm_output"),
+        ];
+        if let Some(parent) = base_dir.parent() {
+            candidates.push(parent.to_path_buf());
+            candidates.push(parent.join("tvm_output"));
+            candidates.push(parent.join("Resources"));
+            candidates.push(parent.join("Resources").join("tvm_output"));
+        }
+        candidates
+    }
+
+    /// Resolve a directory containing compiled artifacts, useful for app bundle paths.
+    pub fn load_from_artifacts_dir(base_dir: impl AsRef<Path>, device: &str) -> Result<Self> {
+        let base_dir = base_dir.as_ref();
+        let ext = Self::artifact_extension(device);
+
+        let mut details = Vec::new();
+        for candidate in Self::candidate_artifact_dirs(base_dir) {
+            let missing = Self::missing_required_artifacts(&candidate, ext);
+            if missing.is_empty() {
+                return Self::load(&candidate, device);
+            }
+
+            let status = if candidate.exists() {
+                format!("missing {:?}", missing)
+            } else {
+                "directory missing".to_string()
+            };
+            details.push(format!("{:?}: {}", candidate, status));
+        }
+
+        Err(anyhow::anyhow!(
+            "No compiled artifacts found for device '{}'. Tried:\n{}",
+            device,
+            details.join("\n")
+        ))
+    }
+
     /// Load TVM modules from a directory.
     ///
     /// Args:
@@ -303,15 +381,7 @@ impl KokoroPipeline {
         // Try to load libtvm_runtime to register Relax VM loader
         Self::init_relax_runtime()?;
 
-        let ext = if cfg!(target_os = "macos") {
-            if device == "metal" {
-                "dylib"
-            } else {
-                "so"
-            }
-        } else {
-            "so"
-        };
+        let ext = Self::artifact_extension(device);
 
         let device_type = Self::device_type_code(device);
         let device_id = 0i32;
