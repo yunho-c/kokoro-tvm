@@ -155,6 +155,7 @@ Make sure all:
 
 ```bash
 cd rust
+set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH
 cargo build --release --target aarch64-apple-ios
 ```
 

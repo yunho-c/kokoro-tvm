@@ -161,8 +161,10 @@ macro_rules! tvm_err {
 
 ### Compile Time
 ```bash
-export LIBRARY_PATH="/path/to/tvm-ffi/build/lib:$LIBRARY_PATH"
-cargo build --release
+# export LIBRARY_PATH="/path/to/tvm-ffi/build/lib:$LIBRARY_PATH"
+# cargo build --release
+set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH
+cargo build --release --features frb
 ```
 
 ### Run Time

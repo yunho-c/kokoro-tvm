@@ -42,7 +42,7 @@ path = "src/main.rs"
 [lib]
 name = "kokoro_tvm"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
