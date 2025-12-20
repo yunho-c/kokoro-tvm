@@ -89,6 +89,25 @@ flowchart TD
   - `status()`
 - User taps “Speak”:
   - `synthesize(text, voice_id, speed)`
+- App background:
+  - keep in memory or call `shutdown()` on low memory
+
+## FRB Codegen
+- Build Rust with feature flag enabled:
+  - `cargo build --features frb`
+- Generate bindings (pick one flow):
+  - `flutter_rust_bridge_codegen --rust-input rust/src/frb_api.rs --dart-output <flutter_pkg>/lib/ffi/kokoro_tvm.dart --c-output <flutter_pkg>/ios/Classes/frb_generated.h`
+  - `dart run flutter_rust_bridge_codegen generate --rust-input rust/src/frb_api.rs --dart-output <flutter_pkg>/lib/ffi/kokoro_tvm.dart --c-output <flutter_pkg>/ios/Classes/frb_generated.h`
+
+## Dart Example (Init + Synthesize)
+```dart
+final api = KokoroTvmImpl();
+await api.frbInit(artifactsDir, device, vocabPath, voicePath);
+await api.frbWarmup();
+
+final result = await api.frbSynthesize(phonemes, 1.0);
+final samples = result.audio;
+```
 
 ## Dart Example (Status)
 ```dart
@@ -97,8 +116,6 @@ print('Initialized: ${status.initialized}');
 print('Device: ${status.device}');
 print('Artifacts: ${status.artifactsDir}');
 ```
-- App background:
-  - keep in memory or call `shutdown()` on low memory
 
 ## File Layout Suggestion
 - `rust/src/runtime.rs`: RuntimeState singleton and init/warmup/synthesize.
