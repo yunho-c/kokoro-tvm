@@ -96,8 +96,7 @@ flowchart TD
 - Build Rust with feature flag enabled:
   - `cargo build --features frb`
 - Generate bindings (pick one flow):
-  - `flutter_rust_bridge_codegen --rust-input rust/src/frb_api.rs --dart-output <flutter_pkg>/lib/ffi/kokoro_tvm.dart --c-output <flutter_pkg>/ios/Classes/frb_generated.h`
-  - `dart run flutter_rust_bridge_codegen generate --rust-input rust/src/frb_api.rs --dart-output <flutter_pkg>/lib/ffi/kokoro_tvm.dart --c-output <flutter_pkg>/ios/Classes/frb_generated.h`
+  - `flutter_rust_bridge_codegen generate --rust-root rust --rust-input crate::frb_api --rust-features frb --dart-output ../kokoro-flutter/kokoro_flutter/lib/ffi/kokoro_tvm.dart --c-output ../kokoro-flutter/kokoro_flutter/ios/Classes/frb_generated.h`
 
 ## Dart Example (Init + Synthesize)
 ```dart

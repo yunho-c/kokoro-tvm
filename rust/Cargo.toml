@@ -30,7 +30,7 @@ anyhow = "1.0"
 libloading = "0.8"
 
 # Flutter Rust Bridge (optional)
-flutter_rust_bridge = { version = "2.5", optional = true }
+flutter_rust_bridge = { version = "=2.11.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -42,10 +42,12 @@ path = "src/main.rs"
 [lib]
 name = "kokoro_tvm"
 path = "src/lib.rs"
+crate-type = ["cdylib"]
 
 [features]
 default = []
 frb = ["flutter_rust_bridge"]
+flutter_rust_bridge = ["dep:flutter_rust_bridge"]
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ["cfg(frb_expand)"] }

@@ -1,3 +1,4 @@
+mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. This line may not be accurate, and you can change it according to your needs. */
 //! Kokoro TVM Inference Library
 //!
 //! A Rust library for running Kokoro TTS inference using TVM-compiled modules.

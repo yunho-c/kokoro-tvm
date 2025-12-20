@@ -31,11 +31,6 @@ Create a separate Flutter plugin repo that:
 Prefer git tag dependency in `Cargo.toml` (inside plugin repo if it builds Rust):
 - `kokoro-tvm = { git = "git@.../kokoro-tvm.git", tag = "v0.1.0", features = ["frb"] }`
 
-### FRB Codegen (from this repo)
-From `kokoro-tvm` root:
-- `cargo build --features frb`
-- `flutter_rust_bridge_codegen --rust-input rust/src/frb_api.rs --dart-output <flutter_repo>/lib/ffi/kokoro_tvm.dart --c-output <flutter_repo>/ios/Classes/frb_generated.h`
-
 ### Dart Wrapper
 Create `lib/kokoro_tvm.dart`:
 - Wrap `KokoroTvmImpl` (generated) with a small API:
