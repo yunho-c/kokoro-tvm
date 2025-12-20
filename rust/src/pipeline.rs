@@ -40,16 +40,16 @@ fn extract_tensor_from_output(output: &tvm_ffi::Any, index: usize) -> Result<tvm
         tvm_ffi::Function::get_global("ffi.ArrayGetItem"),
         "Failed to get ffi.ArrayGetItem function"
     )?;
-    
+
     // Use call_packed with AnyView since &Any doesn't implement ArgIntoRef
     let index_val = index as i64;
     let args = [output_view, tvm_ffi::AnyView::from(&index_val)];
-    
+
     let element = tvm_err!(
         array_get_item.call_packed(&args),
         format!("Failed to get element {} from array", index)
     )?;
-    
+
     tvm_err!(element.try_into(), format!("Failed to convert array element {} to Tensor", index))
 }
 
@@ -289,6 +289,7 @@ pub struct PipelineTrace {
 }
 
 // Allocator type constants (matching Python VirtualMachine class)
+#[allow(dead_code)]
 const NAIVE_ALLOCATOR: i32 = 1;
 const POOLED_ALLOCATOR: i32 = 2;
 
@@ -463,7 +464,7 @@ impl KokoroPipeline {
                 println!("  Loading Decoder from {:?}...", path);
                 path
             };
-            
+
             let (decoder_vm, f_decoder) = Self::load_relax_module(
                 device_type,
                 device_id,
@@ -568,7 +569,7 @@ impl KokoroPipeline {
         // Also add CPU device for shape functions (required by Relax VM)
         let cpu_device_type = 1i32;  // kDLCPU
         let cpu_device_id = 0i32;
-        
+
         if device_type != cpu_device_type {
             // Initialize with both target device and CPU
             tvm_err!(
