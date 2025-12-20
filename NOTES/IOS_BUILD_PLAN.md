@@ -38,6 +38,7 @@ cmake .. \
   -DUSE_VULKAN=OFF \
   -DUSE_RPC=OFF \
   -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_STATIC_RUNTIME=ON \
   -DTVM_FFI_USE_LIBBACKTRACE=OFF \
   -DTVM_FFI_BACKTRACE_ON_SEGFAULT=OFF
 # NOTE: backtrace related options may not work
@@ -80,8 +81,14 @@ Use a target similar to `metal -mtriple=arm64-apple-ios`.
 Example (Python CLI in this repo):
 
 ```bash
-py -3.12 python/src/kokoro_tvm/cli/compile_kokoro.py \
-  --target "metal -mtriple=arm64-apple-ios"
+# py -3.12 python/src/kokoro_tvm/cli/compile_kokoro.py \
+#   --target "metal -mtriple=arm64-apple-ios"
+
+py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component "all" --target "metal-ios" --lstm-method mps --output-dir ktvm_ios --
+seq-len 512 --aligned-len 512
+
+# py -3.12 python/src/kokoro_tvm/cli/port_decoder.py --target "metal-ios" --output-dir ktvm_ios --seq-len 512
+py -3.12 python/src/kokoro_tvm/cli/port_decoder.py --target "metal-ios" --output-dir ktvm_ios --seq-len "128,256,512,1024"
 ```
 
 Place the resulting `.dylib` or `.so` in your iOS bundle resources
@@ -101,8 +108,8 @@ Create `rust/build.rs` that points to the iOS static libs:
 
 ```rust
 fn main() {
-    println!("cargo:rustc-link-search=native=../reference/tvm/build-ios");
-    println!("cargo:rustc-link-search=native=../reference/tvm/3rdparty/tvm-ffi/build-ios");
+    println!("cargo:rustc-link-search=native=../reference/tvm/build-ios/lib");
+    println!("cargo:rustc-link-search=native=../reference/tvm/3rdparty/tvm-ffi/build-ios/lib");
     println!("cargo:rustc-link-lib=static=tvm_runtime");
     println!("cargo:rustc-link-lib=static=tvm_ffi");
     println!("cargo:rustc-link-lib=framework=Metal");
@@ -112,8 +119,8 @@ fn main() {
 
 Environment overrides:
 
-- `TVM_BUILD_DIR`: path to the TVM build output directory (default: `reference/tvm/build-ios`)
-- `TVM_FFI_BUILD_DIR`: path to the tvm-ffi build output directory (default: `reference/tvm/3rdparty/tvm-ffi/build-ios`)
+- `TVM_BUILD_DIR`: path to the TVM build output directory (default: `reference/tvm/build-ios/lib`)
+- `TVM_FFI_BUILD_DIR`: path to the tvm-ffi build output directory (default: `reference/tvm/3rdparty/tvm-ffi/build-ios/lib`)
 - `KOKORO_TVM_LINK_TVM=1`: enable linking TVM on non-iOS targets (disabled by default)
 
 ### Disable `libloading` on iOS
@@ -153,6 +160,21 @@ cargo build --release --target aarch64-apple-ios
 
 You can package the resulting static library into an Xcode project or
 an xcframework.
+
+## Flutter + rust-flutter-bridge checklist
+
+Use the same TVM/tvm-ffi build steps, then integrate into the Flutter iOS app.
+
+- Build Rust as a static library or XCFramework (arm64 + simulator slices).
+- Ensure the iOS Runner target links:
+  - `libtvm_runtime.a`
+  - `libtvm_ffi.a`
+  - Metal / MetalPerformanceShaders / Foundation frameworks
+- Keep the `#[cfg(target_os = "ios")]` guard for `libloading`.
+- Bundle model artifacts in the iOS app resources and pass the bundle path
+  from Swift/Dart into Rust (via rust-flutter-bridge).
+- If you use a Podspec, add the TVM static libs to `vendored_libraries`
+  and the Metal frameworks to `s.frameworks`.
 
 ## Notes
 
