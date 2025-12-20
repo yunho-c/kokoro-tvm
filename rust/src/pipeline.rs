@@ -316,11 +316,35 @@ impl KokoroPipeline {
         ]
     }
 
+    fn required_artifact_groups(base_dir: &Path, ext: &str) -> Vec<Vec<PathBuf>> {
+        vec![
+            vec![
+                base_dir.join(format!("bert_compiled.{}", ext)),
+                base_dir.join(format!("bert_tvm.{}", ext)),
+            ],
+            vec![
+                base_dir.join(format!("duration_compiled.{}", ext)),
+                base_dir.join(format!("duration_tvm.{}", ext)),
+            ],
+            vec![
+                base_dir.join(format!("f0n_compiled.{}", ext)),
+                base_dir.join(format!("f0n_tvm.{}", ext)),
+            ],
+            vec![
+                base_dir.join(format!("text_encoder_compiled.{}", ext)),
+                base_dir.join(format!("text_encoder_tvm.{}", ext)),
+            ],
+        ]
+    }
+
     fn missing_required_artifacts(base_dir: &Path, ext: &str) -> Vec<PathBuf> {
-        Self::required_artifact_paths(base_dir, ext)
-            .into_iter()
-            .filter(|path| !path.exists())
-            .collect()
+        let mut missing = Vec::new();
+        for group in Self::required_artifact_groups(base_dir, ext) {
+            if !group.iter().any(|path| path.exists()) {
+                missing.extend(group);
+            }
+        }
+        missing
     }
 
     fn candidate_artifact_dirs(base_dir: &Path) -> Vec<PathBuf> {
@@ -344,6 +368,27 @@ impl KokoroPipeline {
             candidates.push(parent.join("Resources").join("tvm_output"));
         }
         candidates
+    }
+
+    fn pick_artifact(
+        base_dir: &Path,
+        ext: &str,
+        compiled_name: &str,
+        tvm_name: &str,
+    ) -> Result<PathBuf> {
+        let compiled_path = base_dir.join(format!("{}.{}", compiled_name, ext));
+        if compiled_path.exists() {
+            return Ok(compiled_path);
+        }
+        let tvm_path = base_dir.join(format!("{}.{}", tvm_name, ext));
+        if tvm_path.exists() {
+            return Ok(tvm_path);
+        }
+        Err(anyhow::anyhow!(
+            "Missing compiled artifact: {:?} (or {:?})",
+            compiled_path,
+            tvm_path
+        ))
     }
 
     /// Resolve a directory containing compiled artifacts, useful for app bundle paths.
@@ -389,10 +434,12 @@ impl KokoroPipeline {
         let device = Self::device_from_str(device)?;
 
         // Load and wrap encoder modules
-        let bert_path = lib_dir.join(format!("bert_compiled.{}", ext));
-        let duration_path = lib_dir.join(format!("duration_compiled.{}", ext));
-        let f0n_path = lib_dir.join(format!("f0n_compiled.{}", ext));
-        let text_enc_path = lib_dir.join(format!("text_encoder_compiled.{}", ext));
+        let bert_path = Self::pick_artifact(lib_dir, ext, "bert_compiled", "bert_tvm")?;
+        let duration_path =
+            Self::pick_artifact(lib_dir, ext, "duration_compiled", "duration_tvm")?;
+        let f0n_path = Self::pick_artifact(lib_dir, ext, "f0n_compiled", "f0n_tvm")?;
+        let text_enc_path =
+            Self::pick_artifact(lib_dir, ext, "text_encoder_compiled", "text_encoder_tvm")?;
 
         println!("  Loading BERT from {:?}...", bert_path);
         let (bert_vm, f_bert) =
@@ -423,8 +470,15 @@ impl KokoroPipeline {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if name_str.starts_with("decoder_compiled_seq") && name_str.ends_with(ext) {
-                let prefix = "decoder_compiled_seq";
+            if (name_str.starts_with("decoder_compiled_seq")
+                || name_str.starts_with("decoder_tvm_seq"))
+                && name_str.ends_with(ext)
+            {
+                let prefix = if name_str.starts_with("decoder_compiled_seq") {
+                    "decoder_compiled_seq"
+                } else {
+                    "decoder_tvm_seq"
+                };
                 let suffix = format!(".{}", ext);
                 if let Some(num_str) = name_str
                     .strip_prefix(prefix)
@@ -459,8 +513,13 @@ impl KokoroPipeline {
                 println!("  Loading Decoder from {:?} (LLVM bucket)...", llvm_decoder_path);
                 llvm_decoder_path
             } else {
-                // Fall back to decoder_compiled.so
-                let path = lib_dir.join(format!("decoder_compiled.{}", ext));
+                let compiled_path = lib_dir.join(format!("decoder_compiled.{}", ext));
+                let tvm_path = lib_dir.join(format!("decoder_tvm.{}", ext));
+                let path = if compiled_path.exists() {
+                    compiled_path
+                } else {
+                    tvm_path
+                };
                 println!("  Loading Decoder from {:?}...", path);
                 path
             };

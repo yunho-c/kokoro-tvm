@@ -58,11 +58,11 @@ The Rust loader expects compiled artifacts in a directory. The helper
 
 ### Required Files
 In the chosen directory:
-- `bert_compiled.{so|dylib}`
-- `duration_compiled.{so|dylib}`
-- `f0n_compiled.{so|dylib}`
-- `text_encoder_compiled.{so|dylib}`
-- decoder files (bucketed or `decoder_compiled.{so|dylib}`)
+- `bert_compiled.{so|dylib}` or `bert_tvm.{so|dylib}`
+- `duration_compiled.{so|dylib}` or `duration_tvm.{so|dylib}`
+- `f0n_compiled.{so|dylib}` or `f0n_tvm.{so|dylib}`
+- `text_encoder_compiled.{so|dylib}` or `text_encoder_tvm.{so|dylib}`
+- decoder files (bucketed or `decoder_compiled.{so|dylib}` / `decoder_tvm.{so|dylib}`)
 
 ### iOS
 - Bundle artifacts under `Runner.app/Frameworks` or `Runner.app/Resources`.
@@ -77,6 +77,8 @@ In the chosen directory:
 ### Vocab + Voice Pack
 Keep `vocab.json` and `voice.npy` alongside artifacts, or store them in
 a separate asset directory and pass their absolute paths into `frbInit`.
+Your current iOS assets use `voices.npy`, which is fine as long as you pass
+the full path into `frbInit`/`init`.
 
 ### API Contract (Dart -> Rust)
 - `artifactsDir`: absolute path
