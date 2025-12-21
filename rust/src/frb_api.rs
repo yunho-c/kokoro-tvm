@@ -2,6 +2,7 @@
 
 use crate::runtime;
 use crate::{RuntimeStatus, SynthesisResult};
+use std::env;
 
 #[flutter_rust_bridge::frb]
 pub fn frb_init(
@@ -10,6 +11,12 @@ pub fn frb_init(
     vocab_path: String,
     voice_path: String,
 ) -> Result<(), String> {
+    if env::var_os("RUST_BACKTRACE").is_none() {
+        env::set_var("RUST_BACKTRACE", "1");
+    }
+    if env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        env::set_var("RUST_LIB_BACKTRACE", "1");
+    }
     runtime::init_from_paths(artifacts_dir, device, vocab_path, voice_path)
         .map_err(|err| err.to_string())
 }

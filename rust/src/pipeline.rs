@@ -397,11 +397,16 @@ impl KokoroPipeline {
     pub fn load_from_artifacts_dir(base_dir: impl AsRef<Path>, device: &str) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         let ext = Self::artifact_extension(device);
+        eprintln!(
+            "Resolving TVM artifacts (device='{}', ext='{}') from base_dir: {:?}",
+            device, ext, base_dir
+        );
 
         let mut details = Vec::new();
         for candidate in Self::candidate_artifact_dirs(base_dir) {
             let missing = Self::missing_required_artifacts(&candidate, ext);
             if missing.is_empty() {
+                eprintln!("Using artifacts dir: {:?}", candidate);
                 return Self::load(&candidate, device);
             }
 
@@ -410,6 +415,7 @@ impl KokoroPipeline {
             } else {
                 "directory missing".to_string()
             };
+            eprintln!("Skipping artifacts dir {:?}: {}", candidate, status);
             details.push(format!("{:?}: {}", candidate, status));
         }
 
@@ -430,6 +436,10 @@ impl KokoroPipeline {
         Self::init_relax_runtime()?;
 
         let ext = Self::artifact_extension(device);
+        eprintln!(
+            "Loading TVM artifacts from {:?} (device='{}', ext='{}')",
+            lib_dir, device, ext
+        );
 
         let device_type = Self::device_type_code(device);
         let device_id = 0i32;

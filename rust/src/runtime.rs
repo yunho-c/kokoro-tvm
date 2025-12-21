@@ -192,11 +192,23 @@ impl RuntimeHandle {
             for command in rx {
                 match command {
                     RuntimeCommand::Init { config, reply } => {
-                        let result = worker.init(config).map_err(|err| err.to_string());
+                        let result = match worker.init(config) {
+                            Ok(()) => Ok(()),
+                            Err(err) => {
+                                eprintln!("Init failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
                         let _ = reply.send(result);
                     }
                     RuntimeCommand::Warmup { reply } => {
-                        let result = worker.warmup().map_err(|err| err.to_string());
+                        let result = match worker.warmup() {
+                            Ok(()) => Ok(()),
+                            Err(err) => {
+                                eprintln!("Warmup failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
                         let _ = reply.send(result);
                     }
                     RuntimeCommand::Synthesize {
@@ -205,13 +217,23 @@ impl RuntimeHandle {
                         voice_index,
                         reply,
                     } => {
-                        let result = worker
-                            .synthesize(&phonemes, speed, voice_index)
-                            .map_err(|err| err.to_string());
+                        let result = match worker.synthesize(&phonemes, speed, voice_index) {
+                            Ok(audio) => Ok(audio),
+                            Err(err) => {
+                                eprintln!("Synthesize failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
                         let _ = reply.send(result);
                     }
                     RuntimeCommand::Reset { reply } => {
-                        let result = worker.reset().map_err(|err| err.to_string());
+                        let result = match worker.reset() {
+                            Ok(()) => Ok(()),
+                            Err(err) => {
+                                eprintln!("Reset failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
                         let _ = reply.send(result);
                     }
                     RuntimeCommand::Status { reply } => {
