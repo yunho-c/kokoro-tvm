@@ -296,7 +296,9 @@ const POOLED_ALLOCATOR: i32 = 2;
 
 impl KokoroPipeline {
     fn artifact_extension(device: &str) -> &'static str {
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "ios") {
+            "dylib"
+        } else if cfg!(target_os = "macos") {
             if device == "metal" {
                 "dylib"
             } else {
