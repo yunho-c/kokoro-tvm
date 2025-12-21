@@ -77,7 +77,7 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    target, _, ext, desc = resolve_target(args.target)
+    target, _, ext, desc, _ = resolve_target(args.target)
     print(f"Target: {desc}")
 
     if args.component == "all":
@@ -174,7 +174,19 @@ def compile_component(name, args, target, ext):
     with tvm.transform.PassContext(opt_level=3):
         ex = relax.build(mod, target)
 
-    ex.export_library(output_path)
+    if args.target == "metal-ios":
+        from tvm.contrib import xcode
+
+        sdk = os.environ.get("TVM_IOS_SDK", "iphoneos")
+        arch = os.environ.get("TVM_IOS_ARCH", "arm64")
+        min_os_version = os.environ.get("TVM_IOS_MIN_VERSION")
+        export_kwargs = {"fcompile": xcode.create_dylib, "arch": arch, "sdk": sdk}
+        if min_os_version:
+            export_kwargs["min_os_version"] = min_os_version
+        print(f"Exporting iOS dylib via Xcode toolchain (sdk={sdk}, arch={arch})...")
+        ex.export_library(output_path, **export_kwargs)
+    else:
+        ex.export_library(output_path)
     print(f"Saved {name} to {output_path}")
 
     if args.validate:

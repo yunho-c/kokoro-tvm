@@ -26,22 +26,26 @@ mkdir -p reference/tvm/build-ios
 cd reference/tvm/build-ios
 
 cmake .. \
+  -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_SYSTEM_VERSION=14.0 \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+  -DCMAKE_BUILD_WITH_INSTALL_NAME_DIR=ON \
   -DUSE_METAL=ON \
   -DUSE_MPS=ON \
   -DUSE_LLVM=OFF \
   -DUSE_CUDA=OFF \
   -DUSE_OPENCL=OFF \
   -DUSE_VULKAN=OFF \
-  -DUSE_RPC=OFF \
+  -DUSE_IOS_RPC=ON \
   -DBUILD_SHARED_LIBS=OFF \
   -DBUILD_STATIC_RUNTIME=ON \
   -DTVM_FFI_USE_LIBBACKTRACE=OFF \
   -DTVM_FFI_BACKTRACE_ON_SEGFAULT=OFF
 # NOTE: backtrace related options may not work
+  # -DCMAKE_BUILD_TYPE=Release \
 
 cmake --build . --config Release -j8
 ```
@@ -76,7 +80,7 @@ Outputs: static `libtvm_ffi.a`.
 ## 3) Compile Relax modules for iOS Metal
 
 The compiled modules must match the target triple and Metal backend.
-Use a target similar to `metal -mtriple=arm64-apple-ios`.
+Use a target similar to `metal -mtriple=aarch64-apple-ios`.
 
 Example (Python CLI in this repo):
 
@@ -84,8 +88,7 @@ Example (Python CLI in this repo):
 # py -3.12 python/src/kokoro_tvm/cli/compile_kokoro.py \
 #   --target "metal -mtriple=arm64-apple-ios"
 
-py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component "all" --target "metal-ios" --lstm-method mps --output-dir ktvm_ios --
-seq-len 512 --aligned-len 512
+py -3.12 python/src/kokoro_tvm/cli/port_encoder.py --component "all" --target "metal-ios" --lstm-method mps --output-dir ktvm_ios --seq-len 512 --aligned-len 512
 
 # py -3.12 python/src/kokoro_tvm/cli/port_decoder.py --target "metal-ios" --output-dir ktvm_ios --seq-len 512
 py -3.12 python/src/kokoro_tvm/cli/port_decoder.py --target "metal-ios" --output-dir ktvm_ios --seq-len "128,256,512,1024"
@@ -93,6 +96,24 @@ py -3.12 python/src/kokoro_tvm/cli/port_decoder.py --target "metal-ios" --output
 
 Place the resulting `.dylib` or `.so` in your iOS bundle resources
 (or convert to a format your loader expects).
+
+### iOS dylib export (Xcode toolchain)
+
+The iOS build must use Xcode's toolchain to avoid macOS-only Mach-O output.
+`port_encoder.py` and `port_decoder.py` now export iOS dylibs via
+`tvm.contrib.xcode.create_dylib` when `--target metal-ios` is set.
+
+Environment overrides:
+- `TVM_IOS_SDK=iphoneos` (device) or `TVM_IOS_SDK=iphonesimulator` (simulator)
+- `TVM_IOS_ARCH=arm64` (device or Apple Silicon sim) or `TVM_IOS_ARCH=x86_64` (Intel sim)
+- `TVM_IOS_MIN_VERSION=14.0` (optional)
+
+Quick platform check:
+
+```bash
+otool -l path/to/lib.dylib | grep -A 5 LC_BUILD_VERSION
+# platform 2 == iOS, platform 7 == iOS Simulator
+```
 
 ## 4) Rust toolchain + linking
 
@@ -195,8 +216,11 @@ Make sure all:
 
 ```bash
 cd rust
-set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH
-cargo build --release --target aarch64-apple-ios --features frb
+set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH # NOTE: try without this line too #
+set -x TVM_BUILD_DIR /Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/build-ios
+set -x TVM_FFI_BUILD_DIR /Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build-ios
+cargo build --target aarch64-apple-ios --features frb
+# --release
 ```
 
 You can package the resulting static library into an Xcode project or

@@ -172,6 +172,7 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
     # Compile
     print(f"Compiling for target: {target}")
     is_metal = "metal" in str(target).lower()
+    is_ios_target = args.target == "metal-ios"
 
     with target:
         print("Running DecomposeOpsForInference...")
@@ -273,6 +274,19 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
         print("WebGPU compilation successful!")
         print("Note: Verification requires browser environment. Use RPC to test.")
         return
+
+    if is_ios_target:
+        from tvm.contrib import xcode
+
+        sdk = os.environ.get("TVM_IOS_SDK", "iphoneos")
+        arch = os.environ.get("TVM_IOS_ARCH", "arm64")
+        min_os_version = os.environ.get("TVM_IOS_MIN_VERSION")
+        export_kwargs = {"fcompile": xcode.create_dylib, "arch": arch, "sdk": sdk}
+        if min_os_version:
+            export_kwargs["min_os_version"] = min_os_version
+        print(f"Exporting iOS dylib via Xcode toolchain (sdk={sdk}, arch={arch})...")
+        ex.export_library(output_path, **export_kwargs)
+        print(f"Saved iOS dylib to: {output_path}")
     else:
         # Native export
         ex.export_library(output_path)
@@ -283,7 +297,6 @@ def compile_decoder(args, target, *, seq_len: int, output_path: str, dump_ir: bo
     import platform
 
     is_macos_host = platform.system() == "Darwin"
-    is_ios_target = "ios" in str(target).lower()
 
     if is_metal and is_ios_target:
         print("Skipping verification for iOS target (requires iOS device).")
