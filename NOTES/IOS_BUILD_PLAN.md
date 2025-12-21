@@ -111,11 +111,47 @@ fn main() {
     println!("cargo:rustc-link-search=native=../reference/tvm/build-ios/lib");
     println!("cargo:rustc-link-search=native=../reference/tvm/3rdparty/tvm-ffi/build-ios/lib");
     println!("cargo:rustc-link-lib=static=tvm_runtime");
-    println!("cargo:rustc-link-lib=static=tvm_ffi");
+    println!("cargo:rustc-link-lib=static=tvm_ffi_static");
     println!("cargo:rustc-link-lib=framework=Metal");
     println!("cargo:rustc-link-lib=framework=Foundation");
 }
 ```
+
+#### Force-load for iOS
+
+Even when you link static tvm-ffi, iOS dead-stripping can remove the
+registration code that defines `ffi.ModuleLoadFromFile`. If you see:
+
+```
+RuntimeError: Function ffi.ModuleLoadFromFile not found
+```
+
+you likely need `-Wl,-force_load` for the static archives:
+
+```rust
+println!("cargo:rustc-link-arg=-Wl,-force_load,/abs/path/libtvm_runtime.a");
+println!("cargo:rustc-link-arg=-Wl,-force_load,/abs/path/libtvm_ffi_static.a");
+```
+
+### Dynamic linking (optional, more complex)
+
+If you choose `.dylib` linking instead of static archives, you must:
+- link against `libtvm_ffi.dylib`/`libtvm_runtime.dylib` at build time
+- embed an `rpath` so dyld can find those dylibs at runtime
+- bundle the dylibs in `Frameworks/` and ensure code signing
+
+The current `rust/build.rs` only configures link search paths and
+`-l` flags by default; enable dynamic linking on iOS by setting:
+
+```
+set -x KOKORO_TVM_IOS_DYNAMIC 1
+```
+
+When this flag is set, `rust/build.rs` emits `-rpath` entries for
+`@executable_path/Frameworks` and `@loader_path/Frameworks`, but you
+still need to bundle the dylibs in `Frameworks/` and ensure they are
+signed. Dynamic linking requires extra Xcode or build steps to copy
+the libraries into the app bundle.
 
 Environment overrides:
 
@@ -134,6 +170,10 @@ fn init_relax_runtime() -> Result<()> { ... }
 #[cfg(target_os = "ios")]
 fn init_relax_runtime() -> Result<()> { Ok(()) }
 ```
+
+This means iOS expects the TVM runtime to be *already loaded* at process
+startup (via static linking or a linked dylib). If the runtime isn't
+present, `ffi.ModuleLoadFromFile` will be missing.
 
 ## 5) Bundle model artifacts
 
@@ -156,7 +196,7 @@ Make sure all:
 ```bash
 cd rust
 set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH
-cargo build --release --target aarch64-apple-ios
+cargo build --release --target aarch64-apple-ios --features frb
 ```
 
 You can package the resulting static library into an Xcode project or
