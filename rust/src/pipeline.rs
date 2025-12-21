@@ -309,6 +309,7 @@ impl KokoroPipeline {
         }
     }
 
+    #[allow(dead_code)]
     fn required_artifact_paths(base_dir: &Path, ext: &str) -> Vec<PathBuf> {
         vec![
             base_dir.join(format!("bert_compiled.{}", ext)),
