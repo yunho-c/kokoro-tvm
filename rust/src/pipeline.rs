@@ -68,7 +68,7 @@ fn create_bool_tensor(
     tensor_from_bytes(data, shape, bool_dtype, device)
 }
 
-fn duration_ms(duration: std::time::Duration) -> u32 {
+fn elapsed_ms(duration: std::time::Duration) -> u32 {
     let ms = duration.as_millis();
     if ms > u32::MAX as u128 {
         u32::MAX
@@ -785,7 +785,7 @@ impl KokoroPipeline {
             ),
             "Failed to create attention_mask tensor"
         )?;
-        let preprocess_ms = duration_ms(preprocess_start.elapsed());
+        let preprocess_ms = elapsed_ms(preprocess_start.elapsed());
 
         // BERT: input_ids, attention_mask -> d_en [1, 512, seq_len]
         let bert_start = Instant::now();
@@ -793,7 +793,7 @@ impl KokoroPipeline {
             self.f_bert.call_tuple((&input_ids_tvm, &attention_mask_tvm)),
             "BERT forward failed"
         )?;
-        let bert_ms = duration_ms(bert_start.elapsed());
+        let bert_ms = elapsed_ms(bert_start.elapsed());
         // BERT returns a tuple, extract the first element (d_en)
         let d_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&bert_out, 0)?;
         let d_en: Array3<f32> = tensor_to_array_d(&d_en_tvm)?
@@ -824,7 +824,7 @@ impl KokoroPipeline {
                 .call_tuple((&d_en_tvm, &s_tvm, &lengths_tvm, &text_mask_tvm)),
             "Duration forward failed"
         )?;
-        let duration_ms = duration_ms(duration_start.elapsed());
+        let duration_ms = elapsed_ms(duration_start.elapsed());
 
         let duration_logits_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&duration_out, 0)?;
         let d_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&duration_out, 1)?;
@@ -842,7 +842,7 @@ impl KokoroPipeline {
         // Compute en = d.T @ alignment
         let d_transposed = d_np.view().permuted_axes([0, 2, 1]);
         let en = Self::matmul_3d(&d_transposed, &full_aln.view());
-        let alignment_ms = duration_ms(alignment_start.elapsed());
+        let alignment_ms = elapsed_ms(alignment_start.elapsed());
 
         // F0N: en, s, frame_lengths -> (F0, N)
         let pitch_energy_start = Instant::now();
@@ -863,7 +863,7 @@ impl KokoroPipeline {
             self.f_f0n.call_tuple((&en_tvm, &s_tvm, &frame_lengths_tvm)),
             "F0N forward failed"
         )?;
-        let pitch_energy_ms = duration_ms(pitch_energy_start.elapsed());
+        let pitch_energy_ms = elapsed_ms(pitch_energy_start.elapsed());
         let f0_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&f0n_out, 0)?;
         let n_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&f0n_out, 1)?;
         let f0_np: Array2<f32> = tensor_to_array_d(&f0_tvm)?
@@ -880,7 +880,7 @@ impl KokoroPipeline {
                 .call_tuple((&input_ids_tvm, &lengths_tvm, &text_mask_tvm)),
             "Text encoder forward failed"
         )?;
-        let text_encoder_ms = duration_ms(text_encoder_start.elapsed());
+        let text_encoder_ms = elapsed_ms(text_encoder_start.elapsed());
         let t_en_tvm: tvm_ffi::Tensor = extract_tensor_from_output(&t_en_out, 0)?;
         let t_en: Array3<f32> = tensor_to_array_d(&t_en_tvm)?
             .into_dimensionality()
@@ -951,8 +951,8 @@ impl KokoroPipeline {
         let target_samples = actual_audio_len * SAMPLES_PER_FRAME;
         let trim_len = target_samples.min(audio_data.len());
         let audio = audio_data[..trim_len].to_vec();
-        let decoder_ms = duration_ms(decoder_start.elapsed());
-        let total_ms = duration_ms(total_start.elapsed());
+        let decoder_ms = elapsed_ms(decoder_start.elapsed());
+        let total_ms = elapsed_ms(total_start.elapsed());
         let timings = PipelineTimings {
             total_ms,
             preprocess_ms,
