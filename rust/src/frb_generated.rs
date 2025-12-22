@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -806486239;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1240923851;
 
 // Section: executor
 
@@ -305,12 +305,11 @@ fn wire__crate__frb_api__frb_synthesize_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_phonemes = <String>::sse_decode(&mut deserializer);
-            let api_speed = <f32>::sse_decode(&mut deserializer);
+            let api_request = <crate::runtime::SynthesisRequest>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::error::TtsError>((move || {
-                    let output_ok = crate::frb_api::frb_synthesize(api_phonemes, api_speed)?;
+                    let output_ok = crate::frb_api::frb_synthesize(api_request)?;
                     Ok(output_ok)
                 })())
             }
@@ -339,10 +338,7 @@ fn wire__crate__frb_api__frb_synthesize_stream_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_phonemes = <String>::sse_decode(&mut deserializer);
-            let api_speed = <f32>::sse_decode(&mut deserializer);
-            let api_voice_index = <Option<u32>>::sse_decode(&mut deserializer);
-            let api_chunk_size_ms = <u32>::sse_decode(&mut deserializer);
+            let api_request = <crate::runtime::SynthesisRequest>::sse_decode(&mut deserializer);
             let api_cancel_token = <CancelToken>::sse_decode(&mut deserializer);
             let api_sink = <StreamSink<
                 crate::runtime::AudioChunk,
@@ -352,92 +348,9 @@ fn wire__crate__frb_api__frb_synthesize_stream_impl(
             move |context| {
                 transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_synthesize_stream(
-                        api_phonemes,
-                        api_speed,
-                        api_voice_index,
-                        api_chunk_size_ms,
+                        api_request,
                         api_cancel_token,
                         api_sink,
-                    )?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__frb_api__frb_synthesize_text_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "frb_synthesize_text",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_text = <String>::sse_decode(&mut deserializer);
-            let api_speed = <f32>::sse_decode(&mut deserializer);
-            let api_voice_index = <Option<u32>>::sse_decode(&mut deserializer);
-            let api_language = <Option<String>>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, crate::error::TtsError>((move || {
-                    let output_ok = crate::frb_api::frb_synthesize_text(
-                        api_text,
-                        api_speed,
-                        api_voice_index,
-                        api_language,
-                    )?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__frb_api__frb_synthesize_with_voice_index_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "frb_synthesize_with_voice_index",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_phonemes = <String>::sse_decode(&mut deserializer);
-            let api_speed = <f32>::sse_decode(&mut deserializer);
-            let api_voice_index = <Option<u32>>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, crate::error::TtsError>((move || {
-                    let output_ok = crate::frb_api::frb_synthesize_with_voice_index(
-                        api_phonemes,
-                        api_speed,
-                        api_voice_index,
                     )?;
                     Ok(output_ok)
                 })())
@@ -655,6 +568,17 @@ impl SseDecode for Option<PathBuf> {
     }
 }
 
+impl SseDecode for Option<f32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<f32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -702,6 +626,48 @@ impl SseDecode for crate::runtime::RuntimeStatus {
             artifacts_dir: var_artifactsDir,
             vocab_path: var_vocabPath,
             voice_path: var_voicePath,
+        };
+    }
+}
+
+impl SseDecode for crate::runtime::SynthesisInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_text = <String>::sse_decode(deserializer);
+                let mut var_language = <Option<String>>::sse_decode(deserializer);
+                return crate::runtime::SynthesisInput::Text {
+                    text: var_text,
+                    language: var_language,
+                };
+            }
+            1 => {
+                let mut var_phonemes = <String>::sse_decode(deserializer);
+                return crate::runtime::SynthesisInput::Phonemes {
+                    phonemes: var_phonemes,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for crate::runtime::SynthesisRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_input = <crate::runtime::SynthesisInput>::sse_decode(deserializer);
+        let mut var_voice = <crate::runtime::VoiceSelection>::sse_decode(deserializer);
+        let mut var_speed = <Option<f32>>::sse_decode(deserializer);
+        let mut var_chunkSizeMs = <Option<u32>>::sse_decode(deserializer);
+        return crate::runtime::SynthesisRequest {
+            input: var_input,
+            voice: var_voice,
+            speed: var_speed,
+            chunk_size_ms: var_chunkSizeMs,
         };
     }
 }
@@ -821,6 +787,29 @@ impl SseDecode for crate::voice::VoiceInfo {
     }
 }
 
+impl SseDecode for crate::runtime::VoiceSelection {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                return crate::runtime::VoiceSelection::Auto;
+            }
+            1 => {
+                let mut var_field0 = <String>::sse_decode(deserializer);
+                return crate::runtime::VoiceSelection::Id(var_field0);
+            }
+            2 => {
+                let mut var_field0 = <u32>::sse_decode(deserializer);
+                return crate::runtime::VoiceSelection::Index(var_field0);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -846,14 +835,7 @@ fn pde_ffi_dispatcher_primary_impl(
         7 => wire__crate__frb_api__frb_status_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__frb_api__frb_synthesize_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__frb_api__frb_synthesize_stream_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__frb_api__frb_synthesize_text_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__frb_api__frb_synthesize_with_voice_index_impl(
-            port,
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
-        12 => wire__crate__frb_api__frb_warmup_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__frb_api__frb_warmup_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -943,6 +925,59 @@ impl flutter_rust_bridge::IntoIntoDart<crate::runtime::RuntimeStatus>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::runtime::SynthesisInput {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::runtime::SynthesisInput::Text { text, language } => [
+                0.into_dart(),
+                text.into_into_dart().into_dart(),
+                language.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::runtime::SynthesisInput::Phonemes { phonemes } => {
+                [1.into_dart(), phonemes.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::runtime::SynthesisInput
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::runtime::SynthesisInput>
+    for crate::runtime::SynthesisInput
+{
+    fn into_into_dart(self) -> crate::runtime::SynthesisInput {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::runtime::SynthesisRequest {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.input.into_into_dart().into_dart(),
+            self.voice.into_into_dart().into_dart(),
+            self.speed.into_into_dart().into_dart(),
+            self.chunk_size_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::runtime::SynthesisRequest
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::runtime::SynthesisRequest>
+    for crate::runtime::SynthesisRequest
+{
+    fn into_into_dart(self) -> crate::runtime::SynthesisRequest {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::runtime::SynthesisResult {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1015,6 +1050,34 @@ impl flutter_rust_bridge::IntoDart for crate::voice::VoiceInfo {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::voice::VoiceInfo {}
 impl flutter_rust_bridge::IntoIntoDart<crate::voice::VoiceInfo> for crate::voice::VoiceInfo {
     fn into_into_dart(self) -> crate::voice::VoiceInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::runtime::VoiceSelection {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::runtime::VoiceSelection::Auto => [0.into_dart()].into_dart(),
+            crate::runtime::VoiceSelection::Id(field0) => {
+                [1.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            crate::runtime::VoiceSelection::Index(field0) => {
+                [2.into_dart(), field0.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::runtime::VoiceSelection
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::runtime::VoiceSelection>
+    for crate::runtime::VoiceSelection
+{
+    fn into_into_dart(self) -> crate::runtime::VoiceSelection {
         self
     }
 }
@@ -1161,6 +1224,16 @@ impl SseEncode for Option<PathBuf> {
     }
 }
 
+impl SseEncode for Option<f32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <f32>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1199,6 +1272,36 @@ impl SseEncode for crate::runtime::RuntimeStatus {
         <Option<PathBuf>>::sse_encode(self.artifacts_dir, serializer);
         <Option<PathBuf>>::sse_encode(self.vocab_path, serializer);
         <Option<PathBuf>>::sse_encode(self.voice_path, serializer);
+    }
+}
+
+impl SseEncode for crate::runtime::SynthesisInput {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::runtime::SynthesisInput::Text { text, language } => {
+                <i32>::sse_encode(0, serializer);
+                <String>::sse_encode(text, serializer);
+                <Option<String>>::sse_encode(language, serializer);
+            }
+            crate::runtime::SynthesisInput::Phonemes { phonemes } => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(phonemes, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for crate::runtime::SynthesisRequest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::runtime::SynthesisInput>::sse_encode(self.input, serializer);
+        <crate::runtime::VoiceSelection>::sse_encode(self.voice, serializer);
+        <Option<f32>>::sse_encode(self.speed, serializer);
+        <Option<u32>>::sse_encode(self.chunk_size_ms, serializer);
     }
 }
 
@@ -1291,6 +1394,28 @@ impl SseEncode for crate::voice::VoiceInfo {
         <Option<String>>::sse_encode(self.quality, serializer);
         <Option<Vec<String>>>::sse_encode(self.tags, serializer);
         <Option<usize>>::sse_encode(self.index, serializer);
+    }
+}
+
+impl SseEncode for crate::runtime::VoiceSelection {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::runtime::VoiceSelection::Auto => {
+                <i32>::sse_encode(0, serializer);
+            }
+            crate::runtime::VoiceSelection::Id(field0) => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(field0, serializer);
+            }
+            crate::runtime::VoiceSelection::Index(field0) => {
+                <i32>::sse_encode(2, serializer);
+                <u32>::sse_encode(field0, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 

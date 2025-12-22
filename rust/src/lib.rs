@@ -26,20 +26,22 @@ pub use std::path::PathBuf;
 pub use runtime::{
     AudioChunk,
     CancelToken,
+    DEFAULT_CHUNK_SIZE_MS,
+    DEFAULT_SPEED,
     get_languages,
     get_voices,
     init,
     init_from_paths,
     shutdown,
     synthesize,
-    synthesize_text,
-    synthesize_text_with_voice_index,
-    synthesize_with_voice_index,
     status,
     warmup,
     RuntimeConfig,
     RuntimeStatus,
+    SynthesisInput,
+    SynthesisRequest,
     SynthesisResult,
+    VoiceSelection,
 };
 #[cfg(feature = "frb")]
 pub use runtime::synthesize_stream;

@@ -1,7 +1,9 @@
 //! Flutter Rust Bridge exports.
 
 use crate::runtime;
-use crate::{AudioChunk, CancelToken, RuntimeStatus, SynthesisResult, TtsError, VoiceInfo};
+use crate::{
+    AudioChunk, CancelToken, RuntimeStatus, SynthesisRequest, SynthesisResult, TtsError, VoiceInfo,
+};
 use crate::frb_generated::StreamSink;
 use std::env;
 
@@ -27,30 +29,17 @@ pub fn frb_warmup() -> Result<(), TtsError> {
 }
 
 #[flutter_rust_bridge::frb]
-pub fn frb_synthesize(phonemes: String, speed: f32) -> Result<SynthesisResult, TtsError> {
-    runtime::synthesize(&phonemes, speed).map_err(TtsError::from)
+pub fn frb_synthesize(request: SynthesisRequest) -> Result<SynthesisResult, TtsError> {
+    runtime::synthesize(request).map_err(TtsError::from)
 }
 
 #[flutter_rust_bridge::frb]
-pub fn frb_synthesize_with_voice_index(
-    phonemes: String,
-    speed: f32,
-    voice_index: Option<u32>,
-) -> Result<SynthesisResult, TtsError> {
-    let index = voice_index.map(|value| value as usize);
-    runtime::synthesize_with_voice_index(&phonemes, speed, index).map_err(TtsError::from)
-}
-
-#[flutter_rust_bridge::frb]
-pub fn frb_synthesize_text(
-    text: String,
-    speed: f32,
-    voice_index: Option<u32>,
-    language: Option<String>,
-) -> Result<SynthesisResult, TtsError> {
-    let index = voice_index.map(|value| value as usize);
-    runtime::synthesize_text_with_voice_index(&text, speed, index, language.as_deref())
-        .map_err(TtsError::from)
+pub fn frb_synthesize_stream(
+    request: SynthesisRequest,
+    cancel_token: CancelToken,
+    sink: StreamSink<AudioChunk>,
+) -> Result<(), TtsError> {
+    runtime::synthesize_stream(request, cancel_token, sink).map_err(TtsError::from)
 }
 
 #[flutter_rust_bridge::frb]
@@ -61,27 +50,6 @@ pub fn frb_cancel_token_new() -> CancelToken {
 #[flutter_rust_bridge::frb]
 pub fn frb_cancel_token_cancel(token: CancelToken) {
     token.cancel();
-}
-
-#[flutter_rust_bridge::frb]
-pub fn frb_synthesize_stream(
-    phonemes: String,
-    speed: f32,
-    voice_index: Option<u32>,
-    chunk_size_ms: u32,
-    cancel_token: CancelToken,
-    sink: StreamSink<AudioChunk>,
-) -> Result<(), TtsError> {
-    let index = voice_index.map(|value| value as usize);
-    runtime::synthesize_stream(
-        &phonemes,
-        speed,
-        index,
-        chunk_size_ms,
-        cancel_token,
-        sink,
-    )
-    .map_err(TtsError::from)
 }
 
 #[flutter_rust_bridge::frb]

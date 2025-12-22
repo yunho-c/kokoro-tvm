@@ -6,6 +6,7 @@ use crate::{load_voice_manifest, KokoroPipeline, Vocab, VoiceInfo, VoiceManifest
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
 use crate::frb_generated::StreamSink;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -85,6 +86,30 @@ pub struct RuntimeStatus {
     pub voice_path: Option<PathBuf>,
 }
 
+pub const DEFAULT_SPEED: f32 = 1.0;
+pub const DEFAULT_CHUNK_SIZE_MS: u32 = 250;
+
+#[derive(Clone, Debug)]
+pub enum SynthesisInput {
+    Text { text: String, language: Option<String> },
+    Phonemes { phonemes: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum VoiceSelection {
+    Auto,
+    Id(String),
+    Index(u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct SynthesisRequest {
+    pub input: SynthesisInput,
+    pub voice: VoiceSelection,
+    pub speed: Option<f32>,
+    pub chunk_size_ms: Option<u32>,
+}
+
 enum RuntimeCommand {
     Init {
         config: RuntimeConfig,
@@ -94,16 +119,7 @@ enum RuntimeCommand {
         reply: mpsc::Sender<Result<(), String>>,
     },
     Synthesize {
-        phonemes: String,
-        speed: f32,
-        voice_index: Option<usize>,
-        reply: mpsc::Sender<Result<SynthesisResult, String>>,
-    },
-    SynthesizeText {
-        text: String,
-        speed: f32,
-        voice_index: Option<usize>,
-        language: LanguageCode,
+        request: SynthesisRequest,
         reply: mpsc::Sender<Result<SynthesisResult, String>>,
     },
     GetVoices {
@@ -114,10 +130,7 @@ enum RuntimeCommand {
     },
     #[cfg(feature = "frb")]
     SynthesizeStream {
-        phonemes: String,
-        speed: f32,
-        voice_index: Option<usize>,
-        chunk_size_ms: u32,
+        request: SynthesisRequest,
         cancel_token: CancelToken,
         sink: StreamSink<AudioChunk>,
         reply: mpsc::Sender<Result<(), String>>,
@@ -136,6 +149,7 @@ struct RuntimeWorker {
     vocab: Option<Vocab>,
     voice_pack: Option<VoicePack>,
     voice_manifest: Option<VoiceManifest>,
+    voice_index_by_id: HashMap<String, usize>,
     g2p: Option<G2pEngine>,
 }
 
@@ -147,6 +161,7 @@ impl RuntimeWorker {
             vocab: None,
             voice_pack: None,
             voice_manifest: None,
+            voice_index_by_id: HashMap::new(),
             g2p: None,
         }
     }
@@ -161,12 +176,21 @@ impl RuntimeWorker {
         .context("Failed to load TVM pipeline")?;
 
         let voice_manifest = load_voice_manifest(&config.voice_path, voice_pack.len())?;
+        let mut voice_index_by_id = HashMap::new();
+        if let Some(manifest) = voice_manifest.as_ref() {
+            for voice in manifest.voices() {
+                if let Some(index) = voice.index {
+                    voice_index_by_id.entry(voice.id.clone()).or_insert(index);
+                }
+            }
+        }
 
         self.config = Some(config);
         self.pipeline = Some(pipeline);
         self.vocab = Some(vocab);
         self.voice_pack = Some(voice_pack);
         self.voice_manifest = voice_manifest;
+        self.voice_index_by_id = voice_index_by_id;
         Ok(())
     }
 
@@ -195,12 +219,7 @@ impl RuntimeWorker {
         Ok(())
     }
 
-    fn synthesize(
-        &mut self,
-        phonemes: &str,
-        speed: f32,
-        voice_index: Option<usize>,
-    ) -> Result<SynthesisResult> {
+    fn synthesize(&mut self, request: &SynthesisRequest) -> Result<SynthesisResult> {
         let pipeline = self
             .pipeline
             .as_ref()
@@ -211,16 +230,14 @@ impl RuntimeWorker {
             .as_ref()
             .context("Runtime is not initialized")?;
 
-        let input_ids = vocab.encode(phonemes);
-        let ref_s = if let Some(index) = voice_index {
-            voice_pack.select_style_by_index(index)?
-        } else {
-            let phoneme_len = phonemes.chars().count();
-            voice_pack.select_style(phoneme_len)
-        };
+        let phonemes = self.phonemes_from_request(&request.input, vocab)?;
+        let phoneme_len = phonemes.chars().count();
+        let ref_s = self.select_ref_s(voice_pack, &request.voice, phoneme_len)?;
         let ref_s_slice = ref_s
             .as_slice()
             .context("Style embedding must be contiguous")?;
+        let speed = request.speed.unwrap_or(DEFAULT_SPEED);
+        let input_ids = vocab.encode(&phonemes);
 
         let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
         Ok(SynthesisResult {
@@ -236,18 +253,39 @@ impl RuntimeWorker {
         Ok(self.g2p.as_ref().expect("G2P engine must be initialized"))
     }
 
-    fn synthesize_text(
+    fn phonemes_from_request(
         &mut self,
-        text: &str,
-        speed: f32,
-        voice_index: Option<usize>,
-        language: LanguageCode,
-    ) -> Result<SynthesisResult> {
-        let vocab = self.vocab.as_ref().context("Runtime is not initialized")?;
-        let phonemes = self
-            .g2p()?
-            .text_to_kokoro_phonemes(text, language, vocab)?;
-        self.synthesize(&phonemes, speed, voice_index)
+        input: &SynthesisInput,
+        vocab: &Vocab,
+    ) -> Result<String> {
+        match input {
+            SynthesisInput::Text { text, language } => {
+                let language = parse_language(language.as_deref())?;
+                self.g2p()?
+                    .text_to_kokoro_phonemes(text, language, vocab)
+            }
+            SynthesisInput::Phonemes { phonemes } => Ok(phonemes.clone()),
+        }
+    }
+
+    fn select_ref_s(
+        &self,
+        voice_pack: &VoicePack,
+        voice: &VoiceSelection,
+        phoneme_len: usize,
+    ) -> Result<ndarray::Array2<f32>> {
+        match voice {
+            VoiceSelection::Auto => Ok(voice_pack.select_style(phoneme_len)),
+            VoiceSelection::Index(index) => voice_pack.select_style_by_index(*index as usize),
+            VoiceSelection::Id(id) => {
+                let index = self
+                    .voice_index_by_id
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("Unknown voice id: {}", id))?;
+                voice_pack.select_style_by_index(index)
+            }
+        }
     }
 
     fn get_voices(&self) -> Result<Vec<VoiceInfo>> {
@@ -275,13 +313,11 @@ impl RuntimeWorker {
     #[cfg(feature = "frb")]
     fn synthesize_stream(
         &mut self,
-        phonemes: &str,
-        speed: f32,
-        voice_index: Option<usize>,
-        chunk_size_ms: u32,
+        request: &SynthesisRequest,
         cancel_token: CancelToken,
         sink: StreamSink<AudioChunk>,
     ) -> Result<()> {
+        let chunk_size_ms = request.chunk_size_ms.unwrap_or(DEFAULT_CHUNK_SIZE_MS);
         if chunk_size_ms == 0 {
             anyhow::bail!("chunk_size_ms must be greater than zero");
         }
@@ -296,7 +332,15 @@ impl RuntimeWorker {
             .as_ref()
             .context("Runtime is not initialized")?;
 
-        let chunks = segment_phonemes(phonemes, chunk_size_ms, SAMPLE_RATE);
+        let phonemes = self.phonemes_from_request(&request.input, vocab)?;
+        let phoneme_len = phonemes.chars().count();
+        let ref_s = self.select_ref_s(voice_pack, &request.voice, phoneme_len)?;
+        let ref_s_slice = ref_s
+            .as_slice()
+            .context("Style embedding must be contiguous")?;
+        let speed = request.speed.unwrap_or(DEFAULT_SPEED);
+
+        let chunks = segment_phonemes(&phonemes, chunk_size_ms, SAMPLE_RATE);
         let total_chunks = chunks.len();
         let mut start_sample = 0u64;
 
@@ -306,15 +350,6 @@ impl RuntimeWorker {
             }
 
             let input_ids = vocab.encode(&chunk_phonemes);
-            let ref_s = if let Some(index) = voice_index {
-                voice_pack.select_style_by_index(index)?
-            } else {
-                let phoneme_len = chunk_phonemes.chars().count();
-                voice_pack.select_style(phoneme_len)
-            };
-            let ref_s_slice = ref_s
-                .as_slice()
-                .context("Style embedding must be contiguous")?;
 
             let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
             let audio_len = audio.len() as u64;
@@ -341,6 +376,7 @@ impl RuntimeWorker {
         self.vocab = None;
         self.voice_pack = None;
         self.voice_manifest = None;
+        self.voice_index_by_id.clear();
         self.g2p = None;
         Ok(())
     }
@@ -388,36 +424,14 @@ impl RuntimeHandle {
                         };
                         let _ = reply.send(result);
                     }
-                    RuntimeCommand::Synthesize {
-                        phonemes,
-                        speed,
-                        voice_index,
-                        reply,
-                    } => {
-                        let result = match worker.synthesize(&phonemes, speed, voice_index) {
+                    RuntimeCommand::Synthesize { request, reply } => {
+                        let result = match worker.synthesize(&request) {
                             Ok(audio) => Ok(audio),
                             Err(err) => {
                                 eprintln!("Synthesize failed: {:#}", err);
                                 Err(err.to_string())
                             }
                         };
-                        let _ = reply.send(result);
-                    }
-                    RuntimeCommand::SynthesizeText {
-                        text,
-                        speed,
-                        voice_index,
-                        language,
-                        reply,
-                    } => {
-                        let result =
-                            match worker.synthesize_text(&text, speed, voice_index, language) {
-                                Ok(audio) => Ok(audio),
-                                Err(err) => {
-                                    eprintln!("Synthesize text failed: {:#}", err);
-                                    Err(err.to_string())
-                                }
-                            };
                         let _ = reply.send(result);
                     }
                     RuntimeCommand::GetVoices { reply } => {
@@ -442,22 +456,13 @@ impl RuntimeHandle {
                     }
                     #[cfg(feature = "frb")]
                     RuntimeCommand::SynthesizeStream {
-                        phonemes,
-                        speed,
-                        voice_index,
-                        chunk_size_ms,
+                        request,
                         cancel_token,
                         sink,
                         reply,
                     } => {
-                        let result = match worker.synthesize_stream(
-                            &phonemes,
-                            speed,
-                            voice_index,
-                            chunk_size_ms,
-                            cancel_token,
-                            sink,
-                        ) {
+                        let result =
+                            match worker.synthesize_stream(&request, cancel_token, sink) {
                             Ok(()) => Ok(()),
                             Err(err) => {
                                 eprintln!("Synthesize stream failed: {:#}", err);
@@ -533,61 +538,22 @@ pub fn warmup() -> Result<()> {
     recv_result(reply_rx)
 }
 
-pub fn synthesize(phonemes: &str, speed: f32) -> Result<SynthesisResult> {
-    synthesize_with_voice_index(phonemes, speed, None)
-}
-
-pub fn synthesize_with_voice_index(
-    phonemes: &str,
-    speed: f32,
-    voice_index: Option<usize>,
-) -> Result<SynthesisResult> {
+pub fn synthesize(request: SynthesisRequest) -> Result<SynthesisResult> {
     let handle = runtime_handle()?;
     let (reply_tx, reply_rx) = mpsc::channel();
     handle
         .tx
         .send(RuntimeCommand::Synthesize {
-            phonemes: phonemes.to_string(),
-            speed,
-            voice_index,
+            request,
             reply: reply_tx,
         })
         .context("Failed to send synthesize request")?;
     recv_result(reply_rx)
 }
 
-pub fn synthesize_text(text: &str, speed: f32, language: Option<&str>) -> Result<SynthesisResult> {
-    synthesize_text_with_voice_index(text, speed, None, language)
-}
-
-pub fn synthesize_text_with_voice_index(
-    text: &str,
-    speed: f32,
-    voice_index: Option<usize>,
-    language: Option<&str>,
-) -> Result<SynthesisResult> {
-    let language = parse_language(language)?;
-    let handle = runtime_handle()?;
-    let (reply_tx, reply_rx) = mpsc::channel();
-    handle
-        .tx
-        .send(RuntimeCommand::SynthesizeText {
-            text: text.to_string(),
-            speed,
-            voice_index,
-            language,
-            reply: reply_tx,
-        })
-        .context("Failed to send synthesize text request")?;
-    recv_result(reply_rx)
-}
-
 #[cfg(feature = "frb")]
 pub fn synthesize_stream(
-    phonemes: &str,
-    speed: f32,
-    voice_index: Option<usize>,
-    chunk_size_ms: u32,
+    request: SynthesisRequest,
     cancel_token: CancelToken,
     sink: StreamSink<AudioChunk>,
 ) -> Result<()> {
@@ -596,10 +562,7 @@ pub fn synthesize_stream(
     handle
         .tx
         .send(RuntimeCommand::SynthesizeStream {
-            phonemes: phonemes.to_string(),
-            speed,
-            voice_index,
-            chunk_size_ms,
+            request,
             cancel_token,
             sink,
             reply: reply_tx,
