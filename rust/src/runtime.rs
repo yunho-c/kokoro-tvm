@@ -1,7 +1,7 @@
 //! Runtime wrapper for long-lived inference sessions.
 
 use crate::constants::SAMPLE_RATE;
-use crate::g2p::{parse_language, G2pEngine, LanguageCode};
+use crate::g2p::{parse_language, G2pEngine};
 use crate::{load_voice_manifest, KokoroPipeline, Vocab, VoiceInfo, VoiceManifest, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
@@ -150,7 +150,7 @@ struct RuntimeWorker {
     voice_pack: Option<VoicePack>,
     voice_manifest: Option<VoiceManifest>,
     voice_index_by_id: HashMap<String, usize>,
-    g2p: Option<G2pEngine>,
+    g2p: OnceLock<G2pEngine>,
 }
 
 impl RuntimeWorker {
@@ -162,7 +162,7 @@ impl RuntimeWorker {
             voice_pack: None,
             voice_manifest: None,
             voice_index_by_id: HashMap::new(),
-            g2p: None,
+            g2p: OnceLock::new(),
         }
     }
 
@@ -246,15 +246,18 @@ impl RuntimeWorker {
         })
     }
 
-    fn g2p(&mut self) -> Result<&G2pEngine> {
-        if self.g2p.is_none() {
-            self.g2p = Some(G2pEngine::new()?);
+    fn g2p(&self) -> Result<&G2pEngine> {
+        if self.g2p.get().is_none() {
+            let engine = G2pEngine::new()?;
+            let _ = self.g2p.set(engine);
         }
-        Ok(self.g2p.as_ref().expect("G2P engine must be initialized"))
+        self.g2p
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("G2P engine must be initialized"))
     }
 
     fn phonemes_from_request(
-        &mut self,
+        &self,
         input: &SynthesisInput,
         vocab: &Vocab,
     ) -> Result<String> {
@@ -377,7 +380,7 @@ impl RuntimeWorker {
         self.voice_pack = None;
         self.voice_manifest = None;
         self.voice_index_by_id.clear();
-        self.g2p = None;
+        self.g2p = OnceLock::new();
         Ok(())
     }
 
@@ -655,19 +658,17 @@ fn segment_phonemes(phonemes: &str, chunk_size_ms: u32, sample_rate: u32) -> Vec
         if approx_samples >= target_samples && !current.is_empty() {
             let split_at = last_boundary_index.unwrap_or_else(|| current.len());
             let (chunk, remainder) = current.split_at(split_at);
-            let trimmed_chunk = chunk.trim();
-            if !trimmed_chunk.is_empty() {
-                chunks.push(trimmed_chunk.to_string());
+            if !chunk.is_empty() {
+                chunks.push(chunk.to_string());
             }
-            current = remainder.trim_start().to_string();
+            current = remainder.to_string();
             approx_samples = estimate_samples_for_str(&current);
             last_boundary_index = find_last_boundary_index(&current);
         }
     }
 
-    let tail = current.trim();
-    if !tail.is_empty() {
-        chunks.push(tail.to_string());
+    if !current.is_empty() {
+        chunks.push(current);
     }
 
     chunks
@@ -680,6 +681,7 @@ mod tests {
     #[test]
     fn segment_phonemes_prefers_hard_boundaries() {
         let chunks = segment_phonemes("aa, bb", 10, 30_000);
-        assert_eq!(chunks, vec!["aa,", "bb"]);
+        assert_eq!(chunks[0], "aa,");
+        assert_eq!(chunks.join(""), "aa, bb");
     }
 }

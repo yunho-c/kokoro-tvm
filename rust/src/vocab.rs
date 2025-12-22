@@ -103,4 +103,18 @@ mod tests {
         assert_eq!(ids[ids.len() - 1], 0); // end
         assert!(ids.len() > 2);
     }
+
+    #[test]
+    fn test_filter_to_vocab_counts_dropped() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), 1);
+        map.insert("b".to_string(), 2);
+        map.insert(" ".to_string(), 3);
+
+        let vocab = Vocab { map };
+        let (filtered, dropped) = vocab.filter_to_vocab("a x b ?");
+
+        assert_eq!(filtered, "a  b ");
+        assert_eq!(dropped, 2);
+    }
 }

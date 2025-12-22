@@ -102,7 +102,19 @@ impl G2pBackend for VoiRsBackend {
         )
         .map_err(|err| anyhow::anyhow!("G2P conversion failed: {err}"))?;
         let raw = phonemes_to_kokoro_string(&phonemes);
-        let (filtered, _dropped) = vocab.filter_to_vocab(&raw);
+        let (filtered, dropped) = vocab.filter_to_vocab(&raw);
+        if dropped > 0 {
+            let total = raw.chars().count();
+            let ratio = if total > 0 {
+                (dropped as f32 / total as f32) * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "G2P dropped {} non-vocab symbols ({:.1}% of {}).",
+                dropped, ratio, total
+            );
+        }
         if filtered.is_empty() {
             anyhow::bail!("G2P produced no vocab symbols for input");
         }

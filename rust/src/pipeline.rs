@@ -679,6 +679,24 @@ impl KokoroPipeline {
         *self.decoder_bucket_lens.last().unwrap_or(&STATIC_AUDIO_LEN)
     }
 
+    fn validate_speed(speed: f32) -> Result<()> {
+        if !speed.is_finite() || speed <= 0.0 {
+            anyhow::bail!("Invalid speed: {speed}. speed must be finite and > 0");
+        }
+        Ok(())
+    }
+
+    fn validate_input_ids_len(len: usize) -> Result<()> {
+        if len > STATIC_TEXT_LEN {
+            anyhow::bail!(
+                "Invalid input length: {} tokens exceeds STATIC_TEXT_LEN={}",
+                len,
+                STATIC_TEXT_LEN
+            );
+        }
+        Ok(())
+    }
+
     /// Run full inference.
     ///
     /// Args:
@@ -700,6 +718,8 @@ impl KokoroPipeline {
                 ref_s.len()
             ));
         }
+        Self::validate_speed(speed)?;
+        Self::validate_input_ids_len(input_ids.len())?;
         // --- Preprocessing ---
         let (input_ids_arr, cur_len) = pad_input_ids(input_ids, STATIC_TEXT_LEN);
         let (_text_mask, attention_mask) = create_masks(cur_len, STATIC_TEXT_LEN);
@@ -977,5 +997,25 @@ impl KokoroPipeline {
     fn init_relax_runtime() -> Result<()> {
         // iOS disallows runtime dynamic loading; assume static registration.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KokoroPipeline;
+    use crate::constants::STATIC_TEXT_LEN;
+
+    #[test]
+    fn validate_speed_rejects_non_positive_or_nan() {
+        assert!(KokoroPipeline::validate_speed(1.0).is_ok());
+        assert!(KokoroPipeline::validate_speed(0.0).is_err());
+        assert!(KokoroPipeline::validate_speed(-0.5).is_err());
+        assert!(KokoroPipeline::validate_speed(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn validate_input_ids_len_rejects_overflow() {
+        assert!(KokoroPipeline::validate_input_ids_len(STATIC_TEXT_LEN).is_ok());
+        assert!(KokoroPipeline::validate_input_ids_len(STATIC_TEXT_LEN + 1).is_err());
     }
 }
