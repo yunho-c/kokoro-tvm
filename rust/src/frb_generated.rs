@@ -138,7 +138,7 @@ fn wire__crate__frb_api__frb_get_languages_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_get_languages()?;
                     Ok(output_ok)
                 })())
@@ -170,7 +170,7 @@ fn wire__crate__frb_api__frb_get_voices_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_get_voices()?;
                     Ok(output_ok)
                 })())
@@ -206,7 +206,7 @@ fn wire__crate__frb_api__frb_init_impl(
             let api_voice_path = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_init(
                         api_artifacts_dir,
                         api_device,
@@ -243,7 +243,7 @@ fn wire__crate__frb_api__frb_shutdown_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_shutdown()?;
                     Ok(output_ok)
                 })())
@@ -275,7 +275,7 @@ fn wire__crate__frb_api__frb_status_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_status()?;
                     Ok(output_ok)
                 })())
@@ -309,7 +309,7 @@ fn wire__crate__frb_api__frb_synthesize_impl(
             let api_speed = <f32>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_synthesize(api_phonemes, api_speed)?;
                     Ok(output_ok)
                 })())
@@ -350,7 +350,7 @@ fn wire__crate__frb_api__frb_synthesize_stream_impl(
             >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_synthesize_stream(
                         api_phonemes,
                         api_speed,
@@ -393,7 +393,7 @@ fn wire__crate__frb_api__frb_synthesize_text_impl(
             let api_language = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_synthesize_text(
                         api_text,
                         api_speed,
@@ -433,7 +433,7 @@ fn wire__crate__frb_api__frb_synthesize_with_voice_index_impl(
             let api_voice_index = <Option<u32>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_synthesize_with_voice_index(
                         api_phonemes,
                         api_speed,
@@ -469,7 +469,7 @@ fn wire__crate__frb_api__frb_warmup_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             deserializer.end();
             move |context| {
-                transform_result_sse::<_, String>((move || {
+                transform_result_sse::<_, crate::error::TtsError>((move || {
                     let output_ok = crate::frb_api::frb_warmup()?;
                     Ok(output_ok)
                 })())
@@ -718,6 +718,54 @@ impl SseDecode for crate::runtime::SynthesisResult {
     }
 }
 
+impl SseDecode for crate::error::TtsError {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::NotInitialized {
+                    message: var_message,
+                };
+            }
+            1 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::InvalidInput {
+                    message: var_message,
+                };
+            }
+            2 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::G2p {
+                    message: var_message,
+                };
+            }
+            3 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::Voice {
+                    message: var_message,
+                };
+            }
+            4 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::Io {
+                    message: var_message,
+                };
+            }
+            5 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::error::TtsError::Internal {
+                    message: var_message,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
 impl SseDecode for u32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -912,6 +960,40 @@ impl flutter_rust_bridge::IntoIntoDart<crate::runtime::SynthesisResult>
     for crate::runtime::SynthesisResult
 {
     fn into_into_dart(self) -> crate::runtime::SynthesisResult {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::error::TtsError {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::error::TtsError::NotInitialized { message } => {
+                [0.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::TtsError::InvalidInput { message } => {
+                [1.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::TtsError::G2p { message } => {
+                [2.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::TtsError::Voice { message } => {
+                [3.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::TtsError::Io { message } => {
+                [4.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            crate::error::TtsError::Internal { message } => {
+                [5.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::error::TtsError {}
+impl flutter_rust_bridge::IntoIntoDart<crate::error::TtsError> for crate::error::TtsError {
+    fn into_into_dart(self) -> crate::error::TtsError {
         self
     }
 }
@@ -1125,6 +1207,41 @@ impl SseEncode for crate::runtime::SynthesisResult {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<f32>>::sse_encode(self.audio, serializer);
         <u32>::sse_encode(self.sample_rate, serializer);
+    }
+}
+
+impl SseEncode for crate::error::TtsError {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::error::TtsError::NotInitialized { message } => {
+                <i32>::sse_encode(0, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::TtsError::InvalidInput { message } => {
+                <i32>::sse_encode(1, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::TtsError::G2p { message } => {
+                <i32>::sse_encode(2, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::TtsError::Voice { message } => {
+                <i32>::sse_encode(3, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::TtsError::Io { message } => {
+                <i32>::sse_encode(4, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::error::TtsError::Internal { message } => {
+                <i32>::sse_encode(5, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 

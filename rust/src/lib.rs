@@ -6,6 +6,7 @@
 mod frb_generated;
 
 mod audio;
+pub mod error;
 pub mod g2p;
 pub mod pipeline;
 pub mod preprocessing;
@@ -17,6 +18,7 @@ pub mod voice;
 pub mod frb_api;
 
 pub use audio::save_wav;
+pub use error::TtsError;
 pub use pipeline::{KokoroPipeline, PipelineTrace};
 pub use preprocessing::{build_alignment, build_alignment_with_pred, create_masks, pad_input_ids, sigmoid};
 #[doc(hidden)]
