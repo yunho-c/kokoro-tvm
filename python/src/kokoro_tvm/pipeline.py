@@ -25,7 +25,8 @@ if TYPE_CHECKING:
 
 # Static compilation constants - must match what was used during compilation!
 STATIC_TEXT_LEN = 512
-STATIC_AUDIO_LEN = 5120
+STATIC_AUDIO_LEN = 512
+# STATIC_AUDIO_LEN = 5120  # ain't no way
 STYLE_DIM = 128  # Kokoro-82M uses 128
 
 # Duration/alignment is in decoder frames, but decoder returns waveform samples.

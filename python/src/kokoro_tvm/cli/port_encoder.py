@@ -25,7 +25,7 @@ def main():
         help="Component to compile",
     )
     parser.add_argument("--seq-len", type=int, default=512, help="Static text sequence length")
-    parser.add_argument("--aligned-len", type=int, default=5120, help="Static aligned (audio) length for f0n")
+    parser.add_argument("--aligned-len", type=int, default=512, help="Static aligned (audio) length for f0n")
     parser.add_argument("--output-dir", type=str, default="tvm_output", help="Directory for output libraries")
     parser.add_argument(
         "--target", type=str, default="llvm", choices=["llvm", "metal-macos", "metal-ios"], help="Compilation target"

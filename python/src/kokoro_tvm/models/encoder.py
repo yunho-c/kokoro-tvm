@@ -252,7 +252,7 @@ def create_f0n_module(
     nlayers: int = 3,
     max_dur: int = 50,
     dropout: float = 0.0,
-    aligned_len: int = 5120,
+    aligned_len: int = 512,
     load_weights: bool = True,
     dump_ir: str | None = None,
     lstm_semantics: str = "padded",
