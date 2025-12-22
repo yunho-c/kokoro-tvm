@@ -64,6 +64,7 @@ pub fn parse_language(code: Option<&str>) -> Result<LanguageCode> {
     }
 }
 
+#[allow(dead_code)]
 struct DisabledG2pBackend;
 
 impl G2pBackend for DisabledG2pBackend {

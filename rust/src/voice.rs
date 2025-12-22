@@ -93,7 +93,7 @@ fn parse_manifest_value(value: serde_json::Value) -> Result<Vec<VoiceInfo>> {
         serde_json::Value::Array(values) => values
             .into_iter()
             .map(|entry| {
-                let mut info: VoiceInfo =
+                let info: VoiceInfo =
                     serde_json::from_value(entry).context("Invalid voice manifest entry")?;
                 if info.id.is_empty() {
                     anyhow::bail!("Voice manifest entry is missing id");
