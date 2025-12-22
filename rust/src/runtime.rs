@@ -355,6 +355,9 @@ impl RuntimeWorker {
             let input_ids = vocab.encode(&chunk_phonemes);
 
             let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
             let audio_len = audio.len() as u64;
             let is_final = index + 1 == total_chunks;
 
