@@ -4,7 +4,7 @@ use crate::constants::SAMPLE_RATE;
 use crate::{KokoroPipeline, Vocab, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
-use flutter_rust_bridge::stream::StreamSink;
+use crate::frb_generated::StreamSink;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -263,7 +263,7 @@ impl RuntimeWorker {
                 chunk_index: index as u32,
                 start_sample,
             })
-            .map_err(|err| anyhow::anyhow!(err))?;
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
 
             start_sample += audio_len;
         }
@@ -501,24 +501,73 @@ pub fn status() -> Result<RuntimeStatus> {
 
 #[cfg(feature = "frb")]
 fn segment_phonemes(phonemes: &str, chunk_size_ms: u32, sample_rate: u32) -> Vec<String> {
-    let target_samples = (chunk_size_ms as u64 * sample_rate as u64) / 1000;
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    let mut approx_samples = 0u64;
+    fn is_hard_boundary(ch: char) -> bool {
+        matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '|' | '\n' | '\r')
+    }
 
-    for token in phonemes.split_whitespace() {
-        current.push(token);
-        approx_samples = approx_samples.saturating_add(token.len() as u64 * 100);
-        if approx_samples >= target_samples {
-            chunks.push(current.join(" "));
-            current.clear();
-            approx_samples = 0;
+    fn estimate_char_cost(ch: char) -> u64 {
+        if ch.is_whitespace() || is_hard_boundary(ch) {
+            0
+        } else {
+            100
         }
     }
 
-    if !current.is_empty() {
-        chunks.push(current.join(" "));
+    fn estimate_samples_for_str(value: &str) -> u64 {
+        value.chars().map(estimate_char_cost).sum()
+    }
+
+    fn find_last_boundary_index(value: &str) -> Option<usize> {
+        let mut last = None;
+        for (index, ch) in value.char_indices() {
+            if is_hard_boundary(ch) {
+                last = Some(index + ch.len_utf8());
+            }
+        }
+        last
+    }
+
+    let target_samples = (chunk_size_ms as u64 * sample_rate as u64) / 1000;
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut approx_samples = 0u64;
+    let mut last_boundary_index = None;
+
+    for ch in phonemes.chars() {
+        current.push(ch);
+        approx_samples = approx_samples.saturating_add(estimate_char_cost(ch));
+        if is_hard_boundary(ch) {
+            last_boundary_index = Some(current.len());
+        }
+
+        if approx_samples >= target_samples && !current.is_empty() {
+            let split_at = last_boundary_index.unwrap_or_else(|| current.len());
+            let (chunk, remainder) = current.split_at(split_at);
+            let trimmed_chunk = chunk.trim();
+            if !trimmed_chunk.is_empty() {
+                chunks.push(trimmed_chunk.to_string());
+            }
+            current = remainder.trim_start().to_string();
+            approx_samples = estimate_samples_for_str(&current);
+            last_boundary_index = find_last_boundary_index(&current);
+        }
+    }
+
+    let tail = current.trim();
+    if !tail.is_empty() {
+        chunks.push(tail.to_string());
     }
 
     chunks
+}
+
+#[cfg(all(test, feature = "frb"))]
+mod tests {
+    use super::segment_phonemes;
+
+    #[test]
+    fn segment_phonemes_prefers_hard_boundaries() {
+        let chunks = segment_phonemes("aa, bb", 10, 30_000);
+        assert_eq!(chunks, vec!["aa,", "bb"]);
+    }
 }

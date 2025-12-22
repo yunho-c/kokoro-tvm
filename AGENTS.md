@@ -37,6 +37,16 @@ py -3.12 python/src/kokoro_tvm/cli/compile_kokoro.py
 
 - Commit messages must start with one of: `feat`, `fix`, `misc`, `docs`.
 
+## Rust Tests
+
+Running Rust tests that link against `libtvm_ffi` requires setting the library search paths, e.g.:
+
+```bash
+DYLD_LIBRARY_PATH="reference/tvm/3rdparty/tvm-ffi/build/lib:${DYLD_LIBRARY_PATH:-}" \
+LIBRARY_PATH="reference/tvm/3rdparty/tvm-ffi/build/lib:${LIBRARY_PATH:-}" \
+cargo test --features frb --lib
+```
+
 ## Static Shape Conventions
 
 The pipeline expects statically-compiled shapes that match `python/src/kokoro_tvm/pipeline.py`:

@@ -2,7 +2,7 @@
 
 use crate::runtime;
 use crate::{AudioChunk, CancelToken, RuntimeStatus, SynthesisResult};
-use flutter_rust_bridge::stream::StreamSink;
+use crate::frb_generated::StreamSink;
 use std::env;
 
 #[flutter_rust_bridge::frb]
