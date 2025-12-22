@@ -2,6 +2,7 @@
 
 use crate::constants::SAMPLE_RATE;
 use crate::g2p::{parse_language, G2pEngine};
+use crate::pipeline::PipelineTimings;
 use crate::{load_voice_manifest, KokoroPipeline, Vocab, VoiceInfo, VoiceManifest, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
@@ -15,6 +16,7 @@ use std::sync::{
     OnceLock,
 };
 use std::thread;
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -53,6 +55,7 @@ pub struct AudioChunk {
     pub is_final: bool,
     pub chunk_index: u32,
     pub start_sample: u64,
+    pub diagnostics: Option<SynthesisDiagnostics>,
 }
 
 impl RuntimeConfig {
@@ -75,6 +78,34 @@ impl RuntimeConfig {
 pub struct SynthesisResult {
     pub audio: Vec<f32>,
     pub sample_rate: u32,
+    pub diagnostics: SynthesisDiagnostics,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InferenceTimings {
+    pub total_ms: u32,
+    pub g2p_ms: u32,
+    pub vocab_ms: u32,
+    pub pipeline_ms: u32,
+    pub bert_ms: u32,
+    pub duration_ms: u32,
+    pub alignment_ms: u32,
+    pub pitch_energy_ms: u32,
+    pub text_encoder_ms: u32,
+    pub decoder_ms: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SynthesisDiagnostics {
+    pub input_kind: String,
+    pub input_text_len: Option<u32>,
+    pub phoneme_len: u32,
+    pub phonemes: Option<String>,
+    pub whitespace_leading: u32,
+    pub whitespace_trailing: u32,
+    pub whitespace_trimmed: bool,
+    pub dropped_symbols: u32,
+    pub timings: InferenceTimings,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +139,17 @@ pub struct SynthesisRequest {
     pub voice: VoiceSelection,
     pub speed: Option<f32>,
     pub chunk_size_ms: Option<u32>,
+}
+
+struct PhonemeDiagnostics {
+    phonemes: String,
+    input_kind: String,
+    input_text_len: Option<u32>,
+    whitespace_leading: u32,
+    whitespace_trailing: u32,
+    whitespace_trimmed: bool,
+    dropped_symbols: u32,
+    g2p_ms: u32,
 }
 
 enum RuntimeCommand {
@@ -230,19 +272,47 @@ impl RuntimeWorker {
             .as_ref()
             .context("Runtime is not initialized")?;
 
-        let phonemes = self.phonemes_from_request(&request.input, vocab)?;
+        let total_start = Instant::now();
+        let phoneme_diag = self.phonemes_from_request(&request.input, vocab)?;
+        let phonemes = phoneme_diag.phonemes;
         let phoneme_len = phonemes.chars().count();
         let ref_s = self.select_ref_s(voice_pack, &request.voice, phoneme_len)?;
         let ref_s_slice = ref_s
             .as_slice()
             .context("Style embedding must be contiguous")?;
         let speed = request.speed.unwrap_or(DEFAULT_SPEED);
+        let vocab_start = Instant::now();
         let input_ids = vocab.encode(&phonemes);
+        let vocab_ms = duration_ms(vocab_start.elapsed());
 
-        let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
+        let trace = pipeline.forward_trace(&input_ids, ref_s_slice, speed)?;
+        let timings = InferenceTimings {
+            total_ms: duration_ms(total_start.elapsed()),
+            g2p_ms: phoneme_diag.g2p_ms,
+            vocab_ms,
+            pipeline_ms: trace.timings.total_ms,
+            bert_ms: trace.timings.bert_ms,
+            duration_ms: trace.timings.duration_ms,
+            alignment_ms: trace.timings.alignment_ms,
+            pitch_energy_ms: trace.timings.pitch_energy_ms,
+            text_encoder_ms: trace.timings.text_encoder_ms,
+            decoder_ms: trace.timings.decoder_ms,
+        };
+        let diagnostics = SynthesisDiagnostics {
+            input_kind: phoneme_diag.input_kind,
+            input_text_len: phoneme_diag.input_text_len,
+            phoneme_len: phoneme_len as u32,
+            phonemes: Some(phonemes.clone()),
+            whitespace_leading: phoneme_diag.whitespace_leading,
+            whitespace_trailing: phoneme_diag.whitespace_trailing,
+            whitespace_trimmed: phoneme_diag.whitespace_trimmed,
+            dropped_symbols: phoneme_diag.dropped_symbols,
+            timings,
+        };
         Ok(SynthesisResult {
-            audio,
+            audio: trace.audio,
             sample_rate: SAMPLE_RATE,
+            diagnostics,
         })
     }
 
@@ -260,14 +330,41 @@ impl RuntimeWorker {
         &self,
         input: &SynthesisInput,
         vocab: &Vocab,
-    ) -> Result<String> {
+    ) -> Result<PhonemeDiagnostics> {
         match input {
             SynthesisInput::Text { text, language } => {
+                let (leading, trailing) = whitespace_stats(text);
                 let language = parse_language(language.as_deref())?;
-                self.g2p()?
-                    .text_to_kokoro_phonemes(text, language, vocab)
+                let g2p_start = Instant::now();
+                let g2p_result = self
+                    .g2p()?
+                    .text_to_kokoro_phonemes(text, language, vocab)?;
+                let g2p_ms = duration_ms(g2p_start.elapsed());
+                Ok(PhonemeDiagnostics {
+                    phonemes: g2p_result.phonemes,
+                    input_kind: "text".to_string(),
+                    input_text_len: Some(text.chars().count() as u32),
+                    whitespace_leading: leading,
+                    whitespace_trailing: trailing,
+                    whitespace_trimmed: false,
+                    dropped_symbols: g2p_result.dropped_symbols as u32,
+                    g2p_ms,
+                })
             }
-            SynthesisInput::Phonemes { phonemes } => Ok(phonemes.clone()),
+            SynthesisInput::Phonemes { phonemes } => {
+                let (leading, trailing) = whitespace_stats(phonemes);
+                let (filtered, dropped) = vocab.filter_to_vocab(phonemes);
+                Ok(PhonemeDiagnostics {
+                    phonemes: filtered,
+                    input_kind: "phonemes".to_string(),
+                    input_text_len: None,
+                    whitespace_leading: leading,
+                    whitespace_trailing: trailing,
+                    whitespace_trimmed: false,
+                    dropped_symbols: dropped as u32,
+                    g2p_ms: 0,
+                })
+            }
         }
     }
 
@@ -335,7 +432,9 @@ impl RuntimeWorker {
             .as_ref()
             .context("Runtime is not initialized")?;
 
-        let phonemes = self.phonemes_from_request(&request.input, vocab)?;
+        let total_start = Instant::now();
+        let phoneme_diag = self.phonemes_from_request(&request.input, vocab)?;
+        let phonemes = phoneme_diag.phonemes;
         let phoneme_len = phonemes.chars().count();
         let ref_s = self.select_ref_s(voice_pack, &request.voice, phoneme_len)?;
         let ref_s_slice = ref_s
@@ -346,20 +445,54 @@ impl RuntimeWorker {
         let chunks = segment_phonemes(&phonemes, chunk_size_ms, SAMPLE_RATE);
         let total_chunks = chunks.len();
         let mut start_sample = 0u64;
+        let mut vocab_ms_total = 0u32;
+        let mut pipeline_timings = PipelineTimings::default();
 
         for (index, chunk_phonemes) in chunks.into_iter().enumerate() {
             if cancel_token.is_cancelled() {
                 return Ok(());
             }
 
+            let vocab_start = Instant::now();
             let input_ids = vocab.encode(&chunk_phonemes);
+            let vocab_ms = duration_ms(vocab_start.elapsed());
+            vocab_ms_total = vocab_ms_total.saturating_add(vocab_ms);
 
-            let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
+            let trace = pipeline.forward_trace(&input_ids, ref_s_slice, speed)?;
+            pipeline_timings.add_assign(&trace.timings);
             if cancel_token.is_cancelled() {
                 return Ok(());
             }
+            let audio = trace.audio;
             let audio_len = audio.len() as u64;
             let is_final = index + 1 == total_chunks;
+            let diagnostics = if is_final {
+                let timings = InferenceTimings {
+                    total_ms: duration_ms(total_start.elapsed()),
+                    g2p_ms: phoneme_diag.g2p_ms,
+                    vocab_ms: vocab_ms_total,
+                    pipeline_ms: pipeline_timings.total_ms,
+                    bert_ms: pipeline_timings.bert_ms,
+                    duration_ms: pipeline_timings.duration_ms,
+                    alignment_ms: pipeline_timings.alignment_ms,
+                    pitch_energy_ms: pipeline_timings.pitch_energy_ms,
+                    text_encoder_ms: pipeline_timings.text_encoder_ms,
+                    decoder_ms: pipeline_timings.decoder_ms,
+                };
+                Some(SynthesisDiagnostics {
+                    input_kind: phoneme_diag.input_kind.clone(),
+                    input_text_len: phoneme_diag.input_text_len,
+                    phoneme_len: phoneme_len as u32,
+                    phonemes: Some(phonemes.clone()),
+                    whitespace_leading: phoneme_diag.whitespace_leading,
+                    whitespace_trailing: phoneme_diag.whitespace_trailing,
+                    whitespace_trimmed: phoneme_diag.whitespace_trimmed,
+                    dropped_symbols: phoneme_diag.dropped_symbols,
+                    timings,
+                })
+            } else {
+                None
+            };
 
             sink.add(AudioChunk {
                 samples: audio,
@@ -367,6 +500,7 @@ impl RuntimeWorker {
                 is_final,
                 chunk_index: index as u32,
                 start_sample,
+                diagnostics,
             })
             .map_err(|err| anyhow::anyhow!("{}", err))?;
 
@@ -397,6 +531,25 @@ impl RuntimeWorker {
             voice_path: config.map(|cfg| cfg.voice_path.clone()),
         }
     }
+}
+
+fn duration_ms(duration: std::time::Duration) -> u32 {
+    let ms = duration.as_millis();
+    if ms > u32::MAX as u128 {
+        u32::MAX
+    } else {
+        ms as u32
+    }
+}
+
+fn whitespace_stats(text: &str) -> (u32, u32) {
+    let leading = text.chars().take_while(|ch| ch.is_whitespace()).count() as u32;
+    let trailing = text
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_whitespace())
+        .count() as u32;
+    (leading, trailing)
 }
 
 struct RuntimeHandle {

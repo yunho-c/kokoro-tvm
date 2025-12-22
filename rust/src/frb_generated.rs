@@ -474,12 +474,15 @@ impl SseDecode for crate::runtime::AudioChunk {
         let mut var_isFinal = <bool>::sse_decode(deserializer);
         let mut var_chunkIndex = <u32>::sse_decode(deserializer);
         let mut var_startSample = <u64>::sse_decode(deserializer);
+        let mut var_diagnostics =
+            <Option<crate::runtime::SynthesisDiagnostics>>::sse_decode(deserializer);
         return crate::runtime::AudioChunk {
             samples: var_samples,
             sample_rate: var_sampleRate,
             is_final: var_isFinal,
             chunk_index: var_chunkIndex,
             start_sample: var_startSample,
+            diagnostics: var_diagnostics,
         };
     }
 }
@@ -495,6 +498,34 @@ impl SseDecode for f32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_f32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::runtime::InferenceTimings {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_totalMs = <u32>::sse_decode(deserializer);
+        let mut var_g2PMs = <u32>::sse_decode(deserializer);
+        let mut var_vocabMs = <u32>::sse_decode(deserializer);
+        let mut var_pipelineMs = <u32>::sse_decode(deserializer);
+        let mut var_bertMs = <u32>::sse_decode(deserializer);
+        let mut var_durationMs = <u32>::sse_decode(deserializer);
+        let mut var_alignmentMs = <u32>::sse_decode(deserializer);
+        let mut var_pitchEnergyMs = <u32>::sse_decode(deserializer);
+        let mut var_textEncoderMs = <u32>::sse_decode(deserializer);
+        let mut var_decoderMs = <u32>::sse_decode(deserializer);
+        return crate::runtime::InferenceTimings {
+            total_ms: var_totalMs,
+            g2p_ms: var_g2PMs,
+            vocab_ms: var_vocabMs,
+            pipeline_ms: var_pipelineMs,
+            bert_ms: var_bertMs,
+            duration_ms: var_durationMs,
+            alignment_ms: var_alignmentMs,
+            pitch_energy_ms: var_pitchEnergyMs,
+            text_encoder_ms: var_textEncoderMs,
+            decoder_ms: var_decoderMs,
+        };
     }
 }
 
@@ -579,6 +610,19 @@ impl SseDecode for Option<f32> {
     }
 }
 
+impl SseDecode for Option<crate::runtime::SynthesisDiagnostics> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::runtime::SynthesisDiagnostics>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -630,6 +674,32 @@ impl SseDecode for crate::runtime::RuntimeStatus {
     }
 }
 
+impl SseDecode for crate::runtime::SynthesisDiagnostics {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_inputKind = <String>::sse_decode(deserializer);
+        let mut var_inputTextLen = <Option<u32>>::sse_decode(deserializer);
+        let mut var_phonemeLen = <u32>::sse_decode(deserializer);
+        let mut var_phonemes = <Option<String>>::sse_decode(deserializer);
+        let mut var_whitespaceLeading = <u32>::sse_decode(deserializer);
+        let mut var_whitespaceTrailing = <u32>::sse_decode(deserializer);
+        let mut var_whitespaceTrimmed = <bool>::sse_decode(deserializer);
+        let mut var_droppedSymbols = <u32>::sse_decode(deserializer);
+        let mut var_timings = <crate::runtime::InferenceTimings>::sse_decode(deserializer);
+        return crate::runtime::SynthesisDiagnostics {
+            input_kind: var_inputKind,
+            input_text_len: var_inputTextLen,
+            phoneme_len: var_phonemeLen,
+            phonemes: var_phonemes,
+            whitespace_leading: var_whitespaceLeading,
+            whitespace_trailing: var_whitespaceTrailing,
+            whitespace_trimmed: var_whitespaceTrimmed,
+            dropped_symbols: var_droppedSymbols,
+            timings: var_timings,
+        };
+    }
+}
+
 impl SseDecode for crate::runtime::SynthesisInput {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -677,9 +747,11 @@ impl SseDecode for crate::runtime::SynthesisResult {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_audio = <Vec<f32>>::sse_decode(deserializer);
         let mut var_sampleRate = <u32>::sse_decode(deserializer);
+        let mut var_diagnostics = <crate::runtime::SynthesisDiagnostics>::sse_decode(deserializer);
         return crate::runtime::SynthesisResult {
             audio: var_audio,
             sample_rate: var_sampleRate,
+            diagnostics: var_diagnostics,
         };
     }
 }
@@ -893,6 +965,7 @@ impl flutter_rust_bridge::IntoDart for crate::runtime::AudioChunk {
             self.is_final.into_into_dart().into_dart(),
             self.chunk_index.into_into_dart().into_dart(),
             self.start_sample.into_into_dart().into_dart(),
+            self.diagnostics.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -900,6 +973,35 @@ impl flutter_rust_bridge::IntoDart for crate::runtime::AudioChunk {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::runtime::AudioChunk {}
 impl flutter_rust_bridge::IntoIntoDart<crate::runtime::AudioChunk> for crate::runtime::AudioChunk {
     fn into_into_dart(self) -> crate::runtime::AudioChunk {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::runtime::InferenceTimings {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.total_ms.into_into_dart().into_dart(),
+            self.g2p_ms.into_into_dart().into_dart(),
+            self.vocab_ms.into_into_dart().into_dart(),
+            self.pipeline_ms.into_into_dart().into_dart(),
+            self.bert_ms.into_into_dart().into_dart(),
+            self.duration_ms.into_into_dart().into_dart(),
+            self.alignment_ms.into_into_dart().into_dart(),
+            self.pitch_energy_ms.into_into_dart().into_dart(),
+            self.text_encoder_ms.into_into_dart().into_dart(),
+            self.decoder_ms.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::runtime::InferenceTimings
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::runtime::InferenceTimings>
+    for crate::runtime::InferenceTimings
+{
+    fn into_into_dart(self) -> crate::runtime::InferenceTimings {
         self
     }
 }
@@ -921,6 +1023,34 @@ impl flutter_rust_bridge::IntoIntoDart<crate::runtime::RuntimeStatus>
     for crate::runtime::RuntimeStatus
 {
     fn into_into_dart(self) -> crate::runtime::RuntimeStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::runtime::SynthesisDiagnostics {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.input_kind.into_into_dart().into_dart(),
+            self.input_text_len.into_into_dart().into_dart(),
+            self.phoneme_len.into_into_dart().into_dart(),
+            self.phonemes.into_into_dart().into_dart(),
+            self.whitespace_leading.into_into_dart().into_dart(),
+            self.whitespace_trailing.into_into_dart().into_dart(),
+            self.whitespace_trimmed.into_into_dart().into_dart(),
+            self.dropped_symbols.into_into_dart().into_dart(),
+            self.timings.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::runtime::SynthesisDiagnostics
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::runtime::SynthesisDiagnostics>
+    for crate::runtime::SynthesisDiagnostics
+{
+    fn into_into_dart(self) -> crate::runtime::SynthesisDiagnostics {
         self
     }
 }
@@ -983,6 +1113,7 @@ impl flutter_rust_bridge::IntoDart for crate::runtime::SynthesisResult {
         [
             self.audio.into_into_dart().into_dart(),
             self.sample_rate.into_into_dart().into_dart(),
+            self.diagnostics.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1147,6 +1278,7 @@ impl SseEncode for crate::runtime::AudioChunk {
         <bool>::sse_encode(self.is_final, serializer);
         <u32>::sse_encode(self.chunk_index, serializer);
         <u64>::sse_encode(self.start_sample, serializer);
+        <Option<crate::runtime::SynthesisDiagnostics>>::sse_encode(self.diagnostics, serializer);
     }
 }
 
@@ -1161,6 +1293,22 @@ impl SseEncode for f32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_f32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::runtime::InferenceTimings {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.total_ms, serializer);
+        <u32>::sse_encode(self.g2p_ms, serializer);
+        <u32>::sse_encode(self.vocab_ms, serializer);
+        <u32>::sse_encode(self.pipeline_ms, serializer);
+        <u32>::sse_encode(self.bert_ms, serializer);
+        <u32>::sse_encode(self.duration_ms, serializer);
+        <u32>::sse_encode(self.alignment_ms, serializer);
+        <u32>::sse_encode(self.pitch_energy_ms, serializer);
+        <u32>::sse_encode(self.text_encoder_ms, serializer);
+        <u32>::sse_encode(self.decoder_ms, serializer);
     }
 }
 
@@ -1234,6 +1382,16 @@ impl SseEncode for Option<f32> {
     }
 }
 
+impl SseEncode for Option<crate::runtime::SynthesisDiagnostics> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::runtime::SynthesisDiagnostics>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<u32> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1275,6 +1433,21 @@ impl SseEncode for crate::runtime::RuntimeStatus {
     }
 }
 
+impl SseEncode for crate::runtime::SynthesisDiagnostics {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.input_kind, serializer);
+        <Option<u32>>::sse_encode(self.input_text_len, serializer);
+        <u32>::sse_encode(self.phoneme_len, serializer);
+        <Option<String>>::sse_encode(self.phonemes, serializer);
+        <u32>::sse_encode(self.whitespace_leading, serializer);
+        <u32>::sse_encode(self.whitespace_trailing, serializer);
+        <bool>::sse_encode(self.whitespace_trimmed, serializer);
+        <u32>::sse_encode(self.dropped_symbols, serializer);
+        <crate::runtime::InferenceTimings>::sse_encode(self.timings, serializer);
+    }
+}
+
 impl SseEncode for crate::runtime::SynthesisInput {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1310,6 +1483,7 @@ impl SseEncode for crate::runtime::SynthesisResult {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<f32>>::sse_encode(self.audio, serializer);
         <u32>::sse_encode(self.sample_rate, serializer);
+        <crate::runtime::SynthesisDiagnostics>::sse_encode(self.diagnostics, serializer);
     }
 }
 

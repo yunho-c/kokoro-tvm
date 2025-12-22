@@ -15,7 +15,7 @@ pub trait G2pBackend: Send + Sync {
         text: &str,
         language: LanguageCode,
         vocab: &Vocab,
-    ) -> Result<String>;
+    ) -> Result<G2pResult>;
 }
 
 pub struct G2pEngine {
@@ -43,9 +43,15 @@ impl G2pEngine {
         text: &str,
         language: LanguageCode,
         vocab: &Vocab,
-    ) -> Result<String> {
+    ) -> Result<G2pResult> {
         self.backend.text_to_kokoro_phonemes(text, language, vocab)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct G2pResult {
+    pub phonemes: String,
+    pub dropped_symbols: usize,
 }
 
 pub fn parse_language(code: Option<&str>) -> Result<LanguageCode> {
@@ -66,7 +72,7 @@ impl G2pBackend for DisabledG2pBackend {
         _text: &str,
         _language: LanguageCode,
         _vocab: &Vocab,
-    ) -> Result<String> {
+    ) -> Result<G2pResult> {
         anyhow::bail!("G2P backend is disabled; enable the g2p-voirs feature")
     }
 }
@@ -92,7 +98,7 @@ impl G2pBackend for VoiRsBackend {
         text: &str,
         language: LanguageCode,
         vocab: &Vocab,
-    ) -> Result<String> {
+    ) -> Result<G2pResult> {
         let lang = match language {
             LanguageCode::EnUs => voirs_g2p::LanguageCode::EnUs,
             LanguageCode::EnGb => voirs_g2p::LanguageCode::EnGb,
@@ -118,7 +124,10 @@ impl G2pBackend for VoiRsBackend {
         if filtered.is_empty() {
             anyhow::bail!("G2P produced no vocab symbols for input");
         }
-        Ok(filtered)
+        Ok(G2pResult {
+            phonemes: filtered,
+            dropped_symbols: dropped,
+        })
     }
 }
 
