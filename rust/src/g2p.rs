@@ -1,21 +1,41 @@
 //! VoiRS G2P integration and Kokoro phoneme normalization.
 
 use anyhow::Result;
-use futures::executor::block_on;
-use voirs_g2p::rules::EnglishRuleG2p;
-use voirs_g2p::{G2p, LanguageCode, Phoneme};
-
 use crate::Vocab;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LanguageCode {
+    EnUs,
+    EnGb,
+}
+
+pub trait G2pBackend: Send + Sync {
+    fn text_to_kokoro_phonemes(
+        &self,
+        text: &str,
+        language: LanguageCode,
+        vocab: &Vocab,
+    ) -> Result<String>;
+}
+
 pub struct G2pEngine {
-    inner: EnglishRuleG2p,
+    backend: Box<dyn G2pBackend>,
 }
 
 impl G2pEngine {
     pub fn new() -> Result<Self> {
-        let inner =
-            EnglishRuleG2p::new().map_err(|err| anyhow::anyhow!("G2P init failed: {err}"))?;
-        Ok(Self { inner })
+        #[cfg(feature = "g2p-voirs")]
+        {
+            Ok(Self {
+                backend: Box::new(VoiRsBackend::new()?),
+            })
+        }
+        #[cfg(not(feature = "g2p-voirs"))]
+        {
+            Ok(Self {
+                backend: Box::new(DisabledG2pBackend),
+            })
+        }
     }
 
     pub fn text_to_kokoro_phonemes(
@@ -24,16 +44,7 @@ impl G2pEngine {
         language: LanguageCode,
         vocab: &Vocab,
     ) -> Result<String> {
-        let phonemes =
-            block_on(self.inner.to_phonemes(text, Some(language))).map_err(|err| {
-                anyhow::anyhow!("G2P conversion failed: {err}")
-            })?;
-        let raw = phonemes_to_kokoro_string(&phonemes);
-        let (filtered, _dropped) = vocab.filter_to_vocab(&raw);
-        if filtered.is_empty() {
-            anyhow::bail!("G2P produced no vocab symbols for input");
-        }
-        Ok(filtered)
+        self.backend.text_to_kokoro_phonemes(text, language, vocab)
     }
 }
 
@@ -47,7 +58,60 @@ pub fn parse_language(code: Option<&str>) -> Result<LanguageCode> {
     }
 }
 
-fn phonemes_to_kokoro_string(phonemes: &[Phoneme]) -> String {
+struct DisabledG2pBackend;
+
+impl G2pBackend for DisabledG2pBackend {
+    fn text_to_kokoro_phonemes(
+        &self,
+        _text: &str,
+        _language: LanguageCode,
+        _vocab: &Vocab,
+    ) -> Result<String> {
+        anyhow::bail!("G2P backend is disabled; enable the g2p-voirs feature")
+    }
+}
+
+#[cfg(feature = "g2p-voirs")]
+struct VoiRsBackend {
+    inner: voirs_g2p::rules::EnglishRuleG2p,
+}
+
+#[cfg(feature = "g2p-voirs")]
+impl VoiRsBackend {
+    fn new() -> Result<Self> {
+        let inner = voirs_g2p::rules::EnglishRuleG2p::new()
+            .map_err(|err| anyhow::anyhow!("G2P init failed: {err}"))?;
+        Ok(Self { inner })
+    }
+}
+
+#[cfg(feature = "g2p-voirs")]
+impl G2pBackend for VoiRsBackend {
+    fn text_to_kokoro_phonemes(
+        &self,
+        text: &str,
+        language: LanguageCode,
+        vocab: &Vocab,
+    ) -> Result<String> {
+        let lang = match language {
+            LanguageCode::EnUs => voirs_g2p::LanguageCode::EnUs,
+            LanguageCode::EnGb => voirs_g2p::LanguageCode::EnGb,
+        };
+        let phonemes = futures::executor::block_on(
+            voirs_g2p::G2p::to_phonemes(&self.inner, text, Some(lang)),
+        )
+        .map_err(|err| anyhow::anyhow!("G2P conversion failed: {err}"))?;
+        let raw = phonemes_to_kokoro_string(&phonemes);
+        let (filtered, _dropped) = vocab.filter_to_vocab(&raw);
+        if filtered.is_empty() {
+            anyhow::bail!("G2P produced no vocab symbols for input");
+        }
+        Ok(filtered)
+    }
+}
+
+#[cfg(feature = "g2p-voirs")]
+fn phonemes_to_kokoro_string(phonemes: &[voirs_g2p::Phoneme]) -> String {
     let mut output = String::new();
     for phoneme in phonemes {
         let symbol = phoneme.effective_symbol();

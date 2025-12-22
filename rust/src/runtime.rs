@@ -1,7 +1,7 @@
 //! Runtime wrapper for long-lived inference sessions.
 
 use crate::constants::SAMPLE_RATE;
-use crate::g2p::{parse_language, G2pEngine};
+use crate::g2p::{parse_language, G2pEngine, LanguageCode};
 use crate::{KokoroPipeline, Vocab, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
@@ -14,7 +14,6 @@ use std::sync::{
     OnceLock,
 };
 use std::thread;
-use voirs_g2p::LanguageCode;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
