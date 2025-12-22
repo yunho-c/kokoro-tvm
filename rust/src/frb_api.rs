@@ -1,7 +1,7 @@
 //! Flutter Rust Bridge exports.
 
 use crate::runtime;
-use crate::{AudioChunk, CancelToken, RuntimeStatus, SynthesisResult};
+use crate::{AudioChunk, CancelToken, RuntimeStatus, SynthesisResult, VoiceInfo};
 use crate::frb_generated::StreamSink;
 use std::env;
 
@@ -94,4 +94,14 @@ pub fn frb_shutdown() -> Result<(), String> {
 #[flutter_rust_bridge::frb]
 pub fn frb_status() -> Result<RuntimeStatus, String> {
     runtime::status().map_err(|err| err.to_string())
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_get_voices() -> Result<Vec<VoiceInfo>, String> {
+    runtime::get_voices().map_err(|err| err.to_string())
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_get_languages() -> Result<Vec<String>, String> {
+    runtime::get_languages().map_err(|err| err.to_string())
 }

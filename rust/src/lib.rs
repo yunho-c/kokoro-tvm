@@ -24,6 +24,8 @@ pub use std::path::PathBuf;
 pub use runtime::{
     AudioChunk,
     CancelToken,
+    get_languages,
+    get_voices,
     init,
     init_from_paths,
     shutdown,
@@ -42,7 +44,7 @@ pub use runtime::synthesize_stream;
 #[cfg(feature = "frb")]
 pub use frb_api::*;
 pub use vocab::Vocab;
-pub use voice::VoicePack;
+pub use voice::{load_voice_manifest, VoiceInfo, VoiceManifest, VoicePack};
 
 /// Static constants that must match compilation parameters
 pub mod constants {

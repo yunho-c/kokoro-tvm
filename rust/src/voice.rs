@@ -3,8 +3,203 @@
 use anyhow::{Context, Result};
 use ndarray::{s, Array2, Array3, ArrayD};
 use ndarray_npy::ReadNpyExt;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceInfo {
+    #[serde(default)]
+    pub id: String,
+    pub name: Option<String>,
+    pub language: Option<String>,
+    pub gender: Option<String>,
+    pub quality: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub index: Option<usize>,
+}
+
+impl VoiceInfo {
+    pub fn with_index(id: String, index: usize) -> Self {
+        Self {
+            id,
+            name: Some(format!("Voice {index}")),
+            language: None,
+            gender: None,
+            quality: None,
+            tags: None,
+            index: Some(index),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VoiceManifest {
+    voices: Vec<VoiceInfo>,
+}
+
+impl VoiceManifest {
+    pub fn voices(&self) -> &[VoiceInfo] {
+        &self.voices
+    }
+
+    pub fn languages(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for voice in &self.voices {
+            if let Some(language) = voice.language.as_ref() {
+                if seen.insert(language.clone()) {
+                    out.push(language.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn load(path: &Path, voice_count: usize) -> Result<Self> {
+        let file = File::open(path).context("Failed to open voice manifest")?;
+        let value: serde_json::Value =
+            serde_json::from_reader(file).context("Failed to parse voice manifest JSON")?;
+        let mut voices = parse_manifest_value(value)?;
+        assign_indices(&mut voices, voice_count);
+        enrich_voice_info(&mut voices);
+        Ok(Self { voices })
+    }
+}
+
+pub fn load_voice_manifest(voice_path: &Path, voice_count: usize) -> Result<Option<VoiceManifest>> {
+    let candidates = manifest_candidates(voice_path);
+    for path in candidates {
+        if path.exists() {
+            return Ok(Some(VoiceManifest::load(&path, voice_count)?));
+        }
+    }
+    Ok(None)
+}
+
+fn manifest_candidates(voice_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(voice_path.with_extension("json"));
+    if let Some(parent) = voice_path.parent() {
+        candidates.push(parent.join("voices.json"));
+        candidates.push(parent.join("voice_manifest.json"));
+    }
+    candidates
+}
+
+fn parse_manifest_value(value: serde_json::Value) -> Result<Vec<VoiceInfo>> {
+    match value {
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|entry| {
+                let mut info: VoiceInfo =
+                    serde_json::from_value(entry).context("Invalid voice manifest entry")?;
+                if info.id.is_empty() {
+                    anyhow::bail!("Voice manifest entry is missing id");
+                }
+                Ok(info)
+            })
+            .collect(),
+        serde_json::Value::Object(map) => {
+            if let Some(voices_value) = map.get("voices") {
+                return parse_manifest_value(voices_value.clone());
+            }
+            let mut voices = Vec::new();
+            for (id, entry) in map {
+                let mut info: VoiceInfo =
+                    serde_json::from_value(entry).context("Invalid voice manifest entry")?;
+                if info.id.is_empty() {
+                    info.id = id;
+                }
+                voices.push(info);
+            }
+            Ok(voices)
+        }
+        _ => anyhow::bail!("Voice manifest must be a list or object"),
+    }
+}
+
+fn assign_indices(voices: &mut [VoiceInfo], voice_count: usize) {
+    let mut used = HashSet::new();
+    for voice in voices.iter_mut() {
+        if let Some(index) = voice.index {
+            if index < voice_count {
+                used.insert(index);
+            } else {
+                voice.index = None;
+            }
+        }
+    }
+
+    let mut next_index = 0usize;
+    for voice in voices.iter_mut() {
+        if voice.index.is_some() {
+            continue;
+        }
+        while used.contains(&next_index) && next_index < voice_count {
+            next_index += 1;
+        }
+        if next_index >= voice_count {
+            break;
+        }
+        voice.index = Some(next_index);
+        used.insert(next_index);
+        next_index += 1;
+    }
+}
+
+fn enrich_voice_info(voices: &mut [VoiceInfo]) {
+    for voice in voices.iter_mut() {
+        let (language, gender, name) = parse_voice_id(&voice.id);
+        if voice.language.is_none() {
+            voice.language = language;
+        }
+        if voice.gender.is_none() {
+            voice.gender = gender;
+        }
+        if voice.name.is_none() {
+            voice.name = name;
+        }
+    }
+}
+
+fn parse_voice_id(id: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut parts = id.splitn(2, '_');
+    let prefix = parts.next().unwrap_or("");
+    let suffix = parts.next();
+
+    let language = prefix
+        .chars()
+        .next()
+        .and_then(|ch| match ch {
+            'a' => Some("en-US"),
+            'b' => Some("en-GB"),
+            'j' => Some("ja"),
+            'z' => Some("zh-CN"),
+            'e' => Some("es"),
+            'f' => Some("fr-FR"),
+            'h' => Some("hi"),
+            'i' => Some("it"),
+            'p' => Some("pt-BR"),
+            _ => None,
+        })
+        .map(|value| value.to_string());
+
+    let gender = prefix
+        .chars()
+        .nth(1)
+        .and_then(|ch| match ch {
+            'f' => Some("female"),
+            'm' => Some("male"),
+            _ => None,
+        })
+        .map(|value| value.to_string());
+
+    let name = suffix.map(|value| value.replace('-', " ").replace('_', " ").trim().to_string());
+
+    (language, gender, name)
+}
 
 /// Voice pack containing style embeddings.
 ///

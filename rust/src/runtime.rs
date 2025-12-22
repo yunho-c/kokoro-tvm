@@ -2,7 +2,7 @@
 
 use crate::constants::SAMPLE_RATE;
 use crate::g2p::{parse_language, G2pEngine, LanguageCode};
-use crate::{KokoroPipeline, Vocab, VoicePack};
+use crate::{load_voice_manifest, KokoroPipeline, Vocab, VoiceInfo, VoiceManifest, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
 use crate::frb_generated::StreamSink;
@@ -106,6 +106,12 @@ enum RuntimeCommand {
         language: LanguageCode,
         reply: mpsc::Sender<Result<SynthesisResult, String>>,
     },
+    GetVoices {
+        reply: mpsc::Sender<Result<Vec<VoiceInfo>, String>>,
+    },
+    GetLanguages {
+        reply: mpsc::Sender<Result<Vec<String>, String>>,
+    },
     #[cfg(feature = "frb")]
     SynthesizeStream {
         phonemes: String,
@@ -129,6 +135,7 @@ struct RuntimeWorker {
     pipeline: Option<KokoroPipeline>,
     vocab: Option<Vocab>,
     voice_pack: Option<VoicePack>,
+    voice_manifest: Option<VoiceManifest>,
     g2p: Option<G2pEngine>,
 }
 
@@ -139,6 +146,7 @@ impl RuntimeWorker {
             pipeline: None,
             vocab: None,
             voice_pack: None,
+            voice_manifest: None,
             g2p: None,
         }
     }
@@ -152,10 +160,13 @@ impl RuntimeWorker {
         )
         .context("Failed to load TVM pipeline")?;
 
+        let voice_manifest = load_voice_manifest(&config.voice_path, voice_pack.len())?;
+
         self.config = Some(config);
         self.pipeline = Some(pipeline);
         self.vocab = Some(vocab);
         self.voice_pack = Some(voice_pack);
+        self.voice_manifest = voice_manifest;
         Ok(())
     }
 
@@ -239,6 +250,28 @@ impl RuntimeWorker {
         self.synthesize(&phonemes, speed, voice_index)
     }
 
+    fn get_voices(&self) -> Result<Vec<VoiceInfo>> {
+        let pack = self
+            .voice_pack
+            .as_ref()
+            .context("Runtime is not initialized")?;
+        if let Some(manifest) = self.voice_manifest.as_ref() {
+            Ok(manifest.voices().to_vec())
+        } else {
+            Ok((0..pack.len())
+                .map(|index| VoiceInfo::with_index(index.to_string(), index))
+                .collect())
+        }
+    }
+
+    fn get_languages(&self) -> Result<Vec<String>> {
+        if let Some(manifest) = self.voice_manifest.as_ref() {
+            Ok(manifest.languages())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     #[cfg(feature = "frb")]
     fn synthesize_stream(
         &mut self,
@@ -307,6 +340,7 @@ impl RuntimeWorker {
         self.pipeline = None;
         self.vocab = None;
         self.voice_pack = None;
+        self.voice_manifest = None;
         self.g2p = None;
         Ok(())
     }
@@ -384,6 +418,26 @@ impl RuntimeHandle {
                                     Err(err.to_string())
                                 }
                             };
+                        let _ = reply.send(result);
+                    }
+                    RuntimeCommand::GetVoices { reply } => {
+                        let result = match worker.get_voices() {
+                            Ok(voices) => Ok(voices),
+                            Err(err) => {
+                                eprintln!("Get voices failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
+                        let _ = reply.send(result);
+                    }
+                    RuntimeCommand::GetLanguages { reply } => {
+                        let result = match worker.get_languages() {
+                            Ok(languages) => Ok(languages),
+                            Err(err) => {
+                                eprintln!("Get languages failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
                         let _ = reply.send(result);
                     }
                     #[cfg(feature = "frb")]
@@ -571,6 +625,26 @@ pub fn status() -> Result<RuntimeStatus> {
         .tx
         .send(RuntimeCommand::Status { reply: reply_tx })
         .context("Failed to send status request")?;
+    recv_result(reply_rx)
+}
+
+pub fn get_voices() -> Result<Vec<VoiceInfo>> {
+    let handle = runtime_handle()?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    handle
+        .tx
+        .send(RuntimeCommand::GetVoices { reply: reply_tx })
+        .context("Failed to send get voices request")?;
+    recv_result(reply_rx)
+}
+
+pub fn get_languages() -> Result<Vec<String>> {
+    let handle = runtime_handle()?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    handle
+        .tx
+        .send(RuntimeCommand::GetLanguages { reply: reply_tx })
+        .context("Failed to send get languages request")?;
     recv_result(reply_rx)
 }
 
