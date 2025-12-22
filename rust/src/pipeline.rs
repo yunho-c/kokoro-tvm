@@ -305,7 +305,8 @@ pub struct PipelineTimings {
     pub preprocess_ms: u32,
     pub bert_ms: u32,
     pub duration_ms: u32,
-    pub alignment_ms: u32,
+    pub alignment_build_ms: u32,
+    pub alignment_matmul_ms: u32,
     pub pitch_energy_ms: u32,
     pub text_encoder_ms: u32,
     pub decoder_ms: u32,
@@ -317,7 +318,12 @@ impl PipelineTimings {
         self.preprocess_ms = self.preprocess_ms.saturating_add(other.preprocess_ms);
         self.bert_ms = self.bert_ms.saturating_add(other.bert_ms);
         self.duration_ms = self.duration_ms.saturating_add(other.duration_ms);
-        self.alignment_ms = self.alignment_ms.saturating_add(other.alignment_ms);
+        self.alignment_build_ms = self
+            .alignment_build_ms
+            .saturating_add(other.alignment_build_ms);
+        self.alignment_matmul_ms = self
+            .alignment_matmul_ms
+            .saturating_add(other.alignment_matmul_ms);
         self.pitch_energy_ms = self.pitch_energy_ms.saturating_add(other.pitch_energy_ms);
         self.text_encoder_ms = self.text_encoder_ms.saturating_add(other.text_encoder_ms);
         self.decoder_ms = self.decoder_ms.saturating_add(other.decoder_ms);
@@ -835,14 +841,16 @@ impl KokoroPipeline {
             .map_err(|e| anyhow::anyhow!("Expected duration output to be 3D: {}", e))?;
 
         // Alignment computation
-        let alignment_start = Instant::now();
+        let alignment_build_start = Instant::now();
         let (full_aln, actual_audio_len, pred_dur) =
             build_alignment_with_pred(&duration_logits, cur_len, speed);
+        let alignment_build_ms = elapsed_ms(alignment_build_start.elapsed());
 
         // Compute en = d.T @ alignment
+        let alignment_matmul_start = Instant::now();
         let d_transposed = d_np.view().permuted_axes([0, 2, 1]);
         let en = Self::matmul_3d(&d_transposed, &full_aln.view());
-        let alignment_ms = elapsed_ms(alignment_start.elapsed());
+        let alignment_matmul_ms = elapsed_ms(alignment_matmul_start.elapsed());
 
         // F0N: en, s, frame_lengths -> (F0, N)
         let pitch_energy_start = Instant::now();
@@ -958,7 +966,8 @@ impl KokoroPipeline {
             preprocess_ms,
             bert_ms,
             duration_ms,
-            alignment_ms,
+            alignment_build_ms,
+            alignment_matmul_ms,
             pitch_energy_ms,
             text_encoder_ms,
             decoder_ms,

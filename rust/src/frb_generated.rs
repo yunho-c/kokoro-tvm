@@ -510,7 +510,8 @@ impl SseDecode for crate::runtime::InferenceTimings {
         let mut var_pipelineMs = <u32>::sse_decode(deserializer);
         let mut var_bertMs = <u32>::sse_decode(deserializer);
         let mut var_durationMs = <u32>::sse_decode(deserializer);
-        let mut var_alignmentMs = <u32>::sse_decode(deserializer);
+        let mut var_alignmentBuildMs = <u32>::sse_decode(deserializer);
+        let mut var_alignmentMatmulMs = <u32>::sse_decode(deserializer);
         let mut var_pitchEnergyMs = <u32>::sse_decode(deserializer);
         let mut var_textEncoderMs = <u32>::sse_decode(deserializer);
         let mut var_decoderMs = <u32>::sse_decode(deserializer);
@@ -521,7 +522,8 @@ impl SseDecode for crate::runtime::InferenceTimings {
             pipeline_ms: var_pipelineMs,
             bert_ms: var_bertMs,
             duration_ms: var_durationMs,
-            alignment_ms: var_alignmentMs,
+            alignment_build_ms: var_alignmentBuildMs,
+            alignment_matmul_ms: var_alignmentMatmulMs,
             pitch_energy_ms: var_pitchEnergyMs,
             text_encoder_ms: var_textEncoderMs,
             decoder_ms: var_decoderMs,
@@ -986,7 +988,8 @@ impl flutter_rust_bridge::IntoDart for crate::runtime::InferenceTimings {
             self.pipeline_ms.into_into_dart().into_dart(),
             self.bert_ms.into_into_dart().into_dart(),
             self.duration_ms.into_into_dart().into_dart(),
-            self.alignment_ms.into_into_dart().into_dart(),
+            self.alignment_build_ms.into_into_dart().into_dart(),
+            self.alignment_matmul_ms.into_into_dart().into_dart(),
             self.pitch_energy_ms.into_into_dart().into_dart(),
             self.text_encoder_ms.into_into_dart().into_dart(),
             self.decoder_ms.into_into_dart().into_dart(),
@@ -1305,7 +1308,8 @@ impl SseEncode for crate::runtime::InferenceTimings {
         <u32>::sse_encode(self.pipeline_ms, serializer);
         <u32>::sse_encode(self.bert_ms, serializer);
         <u32>::sse_encode(self.duration_ms, serializer);
-        <u32>::sse_encode(self.alignment_ms, serializer);
+        <u32>::sse_encode(self.alignment_build_ms, serializer);
+        <u32>::sse_encode(self.alignment_matmul_ms, serializer);
         <u32>::sse_encode(self.pitch_energy_ms, serializer);
         <u32>::sse_encode(self.text_encoder_ms, serializer);
         <u32>::sse_encode(self.decoder_ms, serializer);
