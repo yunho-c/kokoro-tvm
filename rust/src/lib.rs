@@ -6,6 +6,7 @@
 mod frb_generated;
 
 mod audio;
+pub mod g2p;
 pub mod pipeline;
 pub mod preprocessing;
 pub mod runtime;
@@ -27,6 +28,8 @@ pub use runtime::{
     init_from_paths,
     shutdown,
     synthesize,
+    synthesize_text,
+    synthesize_text_with_voice_index,
     synthesize_with_voice_index,
     status,
     warmup,

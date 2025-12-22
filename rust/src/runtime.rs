@@ -1,6 +1,7 @@
 //! Runtime wrapper for long-lived inference sessions.
 
 use crate::constants::SAMPLE_RATE;
+use crate::g2p::{parse_language, G2pEngine};
 use crate::{KokoroPipeline, Vocab, VoicePack};
 use anyhow::{Context, Result};
 #[cfg(feature = "frb")]
@@ -13,6 +14,7 @@ use std::sync::{
     OnceLock,
 };
 use std::thread;
+use voirs_g2p::LanguageCode;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -98,6 +100,13 @@ enum RuntimeCommand {
         voice_index: Option<usize>,
         reply: mpsc::Sender<Result<SynthesisResult, String>>,
     },
+    SynthesizeText {
+        text: String,
+        speed: f32,
+        voice_index: Option<usize>,
+        language: LanguageCode,
+        reply: mpsc::Sender<Result<SynthesisResult, String>>,
+    },
     #[cfg(feature = "frb")]
     SynthesizeStream {
         phonemes: String,
@@ -121,6 +130,7 @@ struct RuntimeWorker {
     pipeline: Option<KokoroPipeline>,
     vocab: Option<Vocab>,
     voice_pack: Option<VoicePack>,
+    g2p: Option<G2pEngine>,
 }
 
 impl RuntimeWorker {
@@ -130,6 +140,7 @@ impl RuntimeWorker {
             pipeline: None,
             vocab: None,
             voice_pack: None,
+            g2p: None,
         }
     }
 
@@ -208,6 +219,27 @@ impl RuntimeWorker {
         })
     }
 
+    fn g2p(&mut self) -> Result<&G2pEngine> {
+        if self.g2p.is_none() {
+            self.g2p = Some(G2pEngine::new()?);
+        }
+        Ok(self.g2p.as_ref().expect("G2P engine must be initialized"))
+    }
+
+    fn synthesize_text(
+        &mut self,
+        text: &str,
+        speed: f32,
+        voice_index: Option<usize>,
+        language: LanguageCode,
+    ) -> Result<SynthesisResult> {
+        let vocab = self.vocab.as_ref().context("Runtime is not initialized")?;
+        let phonemes = self
+            .g2p()?
+            .text_to_kokoro_phonemes(text, language, vocab)?;
+        self.synthesize(&phonemes, speed, voice_index)
+    }
+
     #[cfg(feature = "frb")]
     fn synthesize_stream(
         &mut self,
@@ -276,6 +308,7 @@ impl RuntimeWorker {
         self.pipeline = None;
         self.vocab = None;
         self.voice_pack = None;
+        self.g2p = None;
         Ok(())
     }
 
@@ -335,6 +368,23 @@ impl RuntimeHandle {
                                 Err(err.to_string())
                             }
                         };
+                        let _ = reply.send(result);
+                    }
+                    RuntimeCommand::SynthesizeText {
+                        text,
+                        speed,
+                        voice_index,
+                        language,
+                        reply,
+                    } => {
+                        let result =
+                            match worker.synthesize_text(&text, speed, voice_index, language) {
+                                Ok(audio) => Ok(audio),
+                                Err(err) => {
+                                    eprintln!("Synthesize text failed: {:#}", err);
+                                    Err(err.to_string())
+                                }
+                            };
                         let _ = reply.send(result);
                     }
                     #[cfg(feature = "frb")]
@@ -450,6 +500,32 @@ pub fn synthesize_with_voice_index(
             reply: reply_tx,
         })
         .context("Failed to send synthesize request")?;
+    recv_result(reply_rx)
+}
+
+pub fn synthesize_text(text: &str, speed: f32, language: Option<&str>) -> Result<SynthesisResult> {
+    synthesize_text_with_voice_index(text, speed, None, language)
+}
+
+pub fn synthesize_text_with_voice_index(
+    text: &str,
+    speed: f32,
+    voice_index: Option<usize>,
+    language: Option<&str>,
+) -> Result<SynthesisResult> {
+    let language = parse_language(language)?;
+    let handle = runtime_handle()?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    handle
+        .tx
+        .send(RuntimeCommand::SynthesizeText {
+            text: text.to_string(),
+            speed,
+            voice_index,
+            language,
+            reply: reply_tx,
+        })
+        .context("Failed to send synthesize text request")?;
     recv_result(reply_rx)
 }
 

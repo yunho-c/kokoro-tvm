@@ -53,6 +53,23 @@ impl Vocab {
         ids
     }
 
+    /// Filter input text to symbols that exist in the vocabulary.
+    pub fn filter_to_vocab(&self, input: &str) -> (String, usize) {
+        let mut filtered = String::new();
+        let mut dropped = 0usize;
+
+        for ch in input.chars() {
+            let key = ch.to_string();
+            if self.map.contains_key(&key) {
+                filtered.push(ch);
+            } else {
+                dropped += 1;
+            }
+        }
+
+        (filtered, dropped)
+    }
+
     /// Get the vocabulary size.
     pub fn len(&self) -> usize {
         self.map.len()

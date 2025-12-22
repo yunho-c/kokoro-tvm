@@ -26,8 +26,14 @@ hound = "3.5"
 # Error handling
 anyhow = "1.0"
 
+# Async helpers
+futures = "0.3"
+
 # Dynamic library loading
 libloading = "0.8"
+
+# G2P conversion
+voirs-g2p = "0.1.0-alpha.2"
 
 # Flutter Rust Bridge (optional)
 flutter_rust_bridge = { version = "=2.11.1", optional = true }

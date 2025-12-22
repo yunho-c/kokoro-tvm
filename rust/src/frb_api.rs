@@ -44,6 +44,18 @@ pub fn frb_synthesize_with_voice_index(
 }
 
 #[flutter_rust_bridge::frb]
+pub fn frb_synthesize_text(
+    text: String,
+    speed: f32,
+    voice_index: Option<u32>,
+    language: Option<String>,
+) -> Result<SynthesisResult, String> {
+    let index = voice_index.map(|value| value as usize);
+    runtime::synthesize_text_with_voice_index(&text, speed, index, language.as_deref())
+        .map_err(|err| err.to_string())
+}
+
+#[flutter_rust_bridge::frb]
 pub fn frb_cancel_token_new() -> CancelToken {
     CancelToken::new()
 }
