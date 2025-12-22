@@ -3,8 +3,15 @@
 use crate::constants::SAMPLE_RATE;
 use crate::{KokoroPipeline, Vocab, VoicePack};
 use anyhow::{Context, Result};
+#[cfg(feature = "frb")]
+use flutter_rust_bridge::stream::StreamSink;
 use std::path::PathBuf;
-use std::sync::{mpsc, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+    Arc,
+    OnceLock,
+};
 use std::thread;
 
 #[derive(Clone, Debug)]
@@ -13,6 +20,37 @@ pub struct RuntimeConfig {
     pub device: String,
     pub vocab_path: PathBuf,
     pub voice_path: PathBuf,
+}
+
+#[cfg_attr(feature = "frb", flutter_rust_bridge::frb(opaque))]
+#[derive(Clone, Debug)]
+pub struct CancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AudioChunk {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub is_final: bool,
+    pub chunk_index: u32,
+    pub start_sample: u64,
 }
 
 impl RuntimeConfig {
@@ -59,6 +97,16 @@ enum RuntimeCommand {
         speed: f32,
         voice_index: Option<usize>,
         reply: mpsc::Sender<Result<SynthesisResult, String>>,
+    },
+    #[cfg(feature = "frb")]
+    SynthesizeStream {
+        phonemes: String,
+        speed: f32,
+        voice_index: Option<usize>,
+        chunk_size_ms: u32,
+        cancel_token: CancelToken,
+        sink: StreamSink<AudioChunk>,
+        reply: mpsc::Sender<Result<(), String>>,
     },
     Status {
         reply: mpsc::Sender<Result<RuntimeStatus, String>>,
@@ -160,6 +208,69 @@ impl RuntimeWorker {
         })
     }
 
+    #[cfg(feature = "frb")]
+    fn synthesize_stream(
+        &mut self,
+        phonemes: &str,
+        speed: f32,
+        voice_index: Option<usize>,
+        chunk_size_ms: u32,
+        cancel_token: CancelToken,
+        sink: StreamSink<AudioChunk>,
+    ) -> Result<()> {
+        if chunk_size_ms == 0 {
+            anyhow::bail!("chunk_size_ms must be greater than zero");
+        }
+
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .context("Runtime is not initialized")?;
+        let vocab = self.vocab.as_ref().context("Runtime is not initialized")?;
+        let voice_pack = self
+            .voice_pack
+            .as_ref()
+            .context("Runtime is not initialized")?;
+
+        let chunks = segment_phonemes(phonemes, chunk_size_ms, SAMPLE_RATE);
+        let total_chunks = chunks.len();
+        let mut start_sample = 0u64;
+
+        for (index, chunk_phonemes) in chunks.into_iter().enumerate() {
+            if cancel_token.is_cancelled() {
+                return Ok(());
+            }
+
+            let input_ids = vocab.encode(&chunk_phonemes);
+            let ref_s = if let Some(index) = voice_index {
+                voice_pack.select_style_by_index(index)?
+            } else {
+                let phoneme_len = chunk_phonemes.chars().count();
+                voice_pack.select_style(phoneme_len)
+            };
+            let ref_s_slice = ref_s
+                .as_slice()
+                .context("Style embedding must be contiguous")?;
+
+            let audio = pipeline.forward(&input_ids, ref_s_slice, speed)?;
+            let audio_len = audio.len() as u64;
+            let is_final = index + 1 == total_chunks;
+
+            sink.add(AudioChunk {
+                samples: audio,
+                sample_rate: SAMPLE_RATE,
+                is_final,
+                chunk_index: index as u32,
+                start_sample,
+            })
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+            start_sample += audio_len;
+        }
+
+        Ok(())
+    }
+
     fn reset(&mut self) -> Result<()> {
         self.config = None;
         self.pipeline = None;
@@ -221,6 +332,32 @@ impl RuntimeHandle {
                             Ok(audio) => Ok(audio),
                             Err(err) => {
                                 eprintln!("Synthesize failed: {:#}", err);
+                                Err(err.to_string())
+                            }
+                        };
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(feature = "frb")]
+                    RuntimeCommand::SynthesizeStream {
+                        phonemes,
+                        speed,
+                        voice_index,
+                        chunk_size_ms,
+                        cancel_token,
+                        sink,
+                        reply,
+                    } => {
+                        let result = match worker.synthesize_stream(
+                            &phonemes,
+                            speed,
+                            voice_index,
+                            chunk_size_ms,
+                            cancel_token,
+                            sink,
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(err) => {
+                                eprintln!("Synthesize stream failed: {:#}", err);
                                 Err(err.to_string())
                             }
                         };
@@ -316,6 +453,32 @@ pub fn synthesize_with_voice_index(
     recv_result(reply_rx)
 }
 
+#[cfg(feature = "frb")]
+pub fn synthesize_stream(
+    phonemes: &str,
+    speed: f32,
+    voice_index: Option<usize>,
+    chunk_size_ms: u32,
+    cancel_token: CancelToken,
+    sink: StreamSink<AudioChunk>,
+) -> Result<()> {
+    let handle = runtime_handle()?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    handle
+        .tx
+        .send(RuntimeCommand::SynthesizeStream {
+            phonemes: phonemes.to_string(),
+            speed,
+            voice_index,
+            chunk_size_ms,
+            cancel_token,
+            sink,
+            reply: reply_tx,
+        })
+        .context("Failed to send synthesize stream request")?;
+    recv_result(reply_rx)
+}
+
 pub fn shutdown() -> Result<()> {
     let handle = runtime_handle()?;
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -334,4 +497,28 @@ pub fn status() -> Result<RuntimeStatus> {
         .send(RuntimeCommand::Status { reply: reply_tx })
         .context("Failed to send status request")?;
     recv_result(reply_rx)
+}
+
+#[cfg(feature = "frb")]
+fn segment_phonemes(phonemes: &str, chunk_size_ms: u32, sample_rate: u32) -> Vec<String> {
+    let target_samples = (chunk_size_ms as u64 * sample_rate as u64) / 1000;
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut approx_samples = 0u64;
+
+    for token in phonemes.split_whitespace() {
+        current.push(token);
+        approx_samples = approx_samples.saturating_add(token.len() as u64 * 100);
+        if approx_samples >= target_samples {
+            chunks.push(current.join(" "));
+            current.clear();
+            approx_samples = 0;
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current.join(" "));
+    }
+
+    chunks
 }

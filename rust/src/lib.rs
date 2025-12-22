@@ -19,6 +19,8 @@ pub use audio::save_wav;
 pub use pipeline::{KokoroPipeline, PipelineTrace};
 pub use preprocessing::{build_alignment, build_alignment_with_pred, create_masks, pad_input_ids, sigmoid};
 pub use runtime::{
+    AudioChunk,
+    CancelToken,
     init,
     init_from_paths,
     shutdown,
@@ -30,6 +32,8 @@ pub use runtime::{
     RuntimeStatus,
     SynthesisResult,
 };
+#[cfg(feature = "frb")]
+pub use runtime::synthesize_stream;
 #[cfg(feature = "frb")]
 pub use frb_api::*;
 pub use vocab::Vocab;

@@ -1,7 +1,8 @@
 //! Flutter Rust Bridge exports.
 
 use crate::runtime;
-use crate::{RuntimeStatus, SynthesisResult};
+use crate::{AudioChunk, CancelToken, RuntimeStatus, SynthesisResult};
+use flutter_rust_bridge::stream::StreamSink;
 use std::env;
 
 #[flutter_rust_bridge::frb]
@@ -40,6 +41,37 @@ pub fn frb_synthesize_with_voice_index(
     let index = voice_index.map(|value| value as usize);
     runtime::synthesize_with_voice_index(&phonemes, speed, index)
         .map_err(|err| err.to_string())
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_cancel_token_new() -> CancelToken {
+    CancelToken::new()
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_cancel_token_cancel(token: CancelToken) {
+    token.cancel();
+}
+
+#[flutter_rust_bridge::frb]
+pub fn frb_synthesize_stream(
+    phonemes: String,
+    speed: f32,
+    voice_index: Option<u32>,
+    chunk_size_ms: u32,
+    cancel_token: CancelToken,
+    sink: StreamSink<AudioChunk>,
+) -> Result<(), String> {
+    let index = voice_index.map(|value| value as usize);
+    runtime::synthesize_stream(
+        &phonemes,
+        speed,
+        index,
+        chunk_size_ms,
+        cancel_token,
+        sink,
+    )
+    .map_err(|err| err.to_string())
 }
 
 #[flutter_rust_bridge::frb]
