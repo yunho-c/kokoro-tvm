@@ -1,7 +1,7 @@
 //! Preprocessing utilities for TVM inference.
 
 use crate::constants::{STATIC_AUDIO_LEN, STATIC_TEXT_LEN};
-use ndarray::{Array1, Array2, Array3, ArrayD, ArrayViewD, Axis};
+use ndarray::{Array1, Array2, ArrayD, ArrayViewD, Axis};
 
 /// Numerically stable sigmoid function.
 pub fn sigmoid(x: &ArrayViewD<f32>) -> ArrayD<f32> {
@@ -45,7 +45,7 @@ pub fn create_masks(cur_len: usize, static_len: usize) -> (Array2<bool>, Array2<
     (text_mask, attention_mask)
 }
 
-/// Build alignment matrix from predicted durations.
+/// Build alignment indices from predicted durations.
 ///
 /// Args:
 ///     duration_logits: [B, seq_len, bins] duration prediction logits
@@ -53,13 +53,13 @@ pub fn create_masks(cur_len: usize, static_len: usize) -> (Array2<bool>, Array2<
 ///     speed: Speed multiplier (1.0 = normal)
 ///
 /// Returns:
-///     - full_aln: [1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN] alignment matrix
+///     - indices: per-frame token indices
 ///     - actual_audio_len: Number of frames actually used
 pub fn build_alignment_with_pred(
     duration_logits: &ArrayD<f32>,
     cur_len: usize,
     speed: f32,
-) -> (Array3<f32>, usize, Array1<i64>) {
+) -> (Vec<usize>, usize, Array1<i64>) {
     // Apply sigmoid and sum over bins dimension
     let probs = sigmoid(&duration_logits.view());
 
@@ -86,32 +86,20 @@ pub fn build_alignment_with_pred(
         .collect();
 
     let actual_audio_len = indices.len().min(STATIC_AUDIO_LEN);
+    let mut indices = indices;
+    indices.truncate(actual_audio_len);
 
-    // Create alignment matrix
-    let mut pred_aln_trg = Array2::<f32>::zeros((cur_len, STATIC_AUDIO_LEN));
-    for (frame_idx, &text_idx) in indices.iter().take(actual_audio_len).enumerate() {
-        pred_aln_trg[[text_idx, frame_idx]] = 1.0;
-    }
-
-    // Pad to full static text length
-    let mut full_aln = Array3::<f32>::zeros((1, STATIC_TEXT_LEN, STATIC_AUDIO_LEN));
-    for i in 0..cur_len {
-        for j in 0..STATIC_AUDIO_LEN {
-            full_aln[[0, i, j]] = pred_aln_trg[[i, j]];
-        }
-    }
-
-    (full_aln, actual_audio_len, Array1::from(pred_dur))
+    (indices, actual_audio_len, Array1::from(pred_dur))
 }
 
 pub fn build_alignment(
     duration_logits: &ArrayD<f32>,
     cur_len: usize,
     speed: f32,
-) -> (Array3<f32>, usize) {
-    let (full_aln, actual_audio_len, _pred_dur) =
+) -> (Vec<usize>, usize) {
+    let (indices, actual_audio_len, _pred_dur) =
         build_alignment_with_pred(duration_logits, cur_len, speed);
-    (full_aln, actual_audio_len)
+    (indices, actual_audio_len)
 }
 
 #[cfg(test)]

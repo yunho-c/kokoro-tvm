@@ -306,7 +306,7 @@ pub struct PipelineTimings {
     pub bert_ms: u32,
     pub duration_ms: u32,
     pub alignment_build_ms: u32,
-    pub alignment_matmul_ms: u32,
+    pub alignment_gather_ms: u32,
     pub pitch_energy_ms: u32,
     pub text_encoder_ms: u32,
     pub decoder_ms: u32,
@@ -321,9 +321,9 @@ impl PipelineTimings {
         self.alignment_build_ms = self
             .alignment_build_ms
             .saturating_add(other.alignment_build_ms);
-        self.alignment_matmul_ms = self
-            .alignment_matmul_ms
-            .saturating_add(other.alignment_matmul_ms);
+        self.alignment_gather_ms = self
+            .alignment_gather_ms
+            .saturating_add(other.alignment_gather_ms);
         self.pitch_energy_ms = self.pitch_energy_ms.saturating_add(other.pitch_energy_ms);
         self.text_encoder_ms = self.text_encoder_ms.saturating_add(other.text_encoder_ms);
         self.decoder_ms = self.decoder_ms.saturating_add(other.decoder_ms);
@@ -842,15 +842,14 @@ impl KokoroPipeline {
 
         // Alignment computation
         let alignment_build_start = Instant::now();
-        let (full_aln, actual_audio_len, pred_dur) =
+        let (indices, actual_audio_len, pred_dur) =
             build_alignment_with_pred(&duration_logits, cur_len, speed);
         let alignment_build_ms = elapsed_ms(alignment_build_start.elapsed());
 
-        // Compute en = d.T @ alignment
-        let alignment_matmul_start = Instant::now();
-        let d_transposed = d_np.view().permuted_axes([0, 2, 1]);
-        let en = Self::matmul_3d(&d_transposed, &full_aln.view());
-        let alignment_matmul_ms = elapsed_ms(alignment_matmul_start.elapsed());
+        // Gather en by repeating per-token features into per-frame slots.
+        let alignment_gather_start = Instant::now();
+        let en = Self::gather_from_time_major(&d_np, &indices, STATIC_AUDIO_LEN);
+        let mut alignment_gather_ms = elapsed_ms(alignment_gather_start.elapsed());
 
         // F0N: en, s, frame_lengths -> (F0, N)
         let pitch_energy_start = Instant::now();
@@ -894,7 +893,11 @@ impl KokoroPipeline {
             .into_dimensionality()
             .map_err(|e| anyhow::anyhow!("Expected text encoder output to be 3D: {}", e))?;
 
-        let asr = Self::matmul_3d(&t_en.view(), &full_aln.view());
+        let asr_gather_start = Instant::now();
+        let asr = Self::gather_from_feature_major(&t_en, &indices, STATIC_AUDIO_LEN);
+        alignment_gather_ms = alignment_gather_ms.saturating_add(
+            elapsed_ms(asr_gather_start.elapsed()),
+        );
 
         // Decoder: asr, F0, N, style[:128] -> audio
         let decoder_start = Instant::now();
@@ -967,7 +970,7 @@ impl KokoroPipeline {
             bert_ms,
             duration_ms,
             alignment_build_ms,
-            alignment_matmul_ms,
+            alignment_gather_ms,
             pitch_energy_ms,
             text_encoder_ms,
             decoder_ms,
@@ -1005,6 +1008,7 @@ impl KokoroPipeline {
 
     /// Batch matrix multiplication for 3D arrays.
     /// [1, M, K] @ [1, K, N] -> [1, M, N]
+    #[allow(dead_code)]
     fn matmul_3d(a: &ArrayView3<f32>, b: &ArrayView3<f32>) -> Array3<f32> {
         let m = a.shape()[1];
         let n = b.shape()[2];
@@ -1023,6 +1027,36 @@ impl KokoroPipeline {
         }
 
         result
+    }
+
+    fn gather_from_time_major(
+        src: &Array3<f32>,
+        indices: &[usize],
+        max_frames: usize,
+    ) -> Array3<f32> {
+        let feature_dim = src.shape()[2];
+        let mut out = Array3::<f32>::zeros((1, feature_dim, max_frames));
+        for (frame_idx, &text_idx) in indices.iter().take(max_frames).enumerate() {
+            for feat in 0..feature_dim {
+                out[[0, feat, frame_idx]] = src[[0, text_idx, feat]];
+            }
+        }
+        out
+    }
+
+    fn gather_from_feature_major(
+        src: &Array3<f32>,
+        indices: &[usize],
+        max_frames: usize,
+    ) -> Array3<f32> {
+        let feature_dim = src.shape()[1];
+        let mut out = Array3::<f32>::zeros((1, feature_dim, max_frames));
+        for (frame_idx, &text_idx) in indices.iter().take(max_frames).enumerate() {
+            for feat in 0..feature_dim {
+                out[[0, feat, frame_idx]] = src[[0, feat, text_idx]];
+            }
+        }
+        out
     }
 
     /// Initialize the Relax VM runtime by loading libtvm_runtime.
