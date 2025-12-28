@@ -718,6 +718,80 @@ def _mock_packed_sequence():
         torch.nn.utils.rnn.pad_packed_sequence = orig_pad
 
 
+def _save_trace_tensors(
+    output_dir: str,
+    *,
+    trace_tvm: dict[str, object],
+    input_ids: np.ndarray,
+    ref_s: np.ndarray,
+    speed: float,
+) -> None:
+    """Save intermediate tensors to .npy files for Rust validation.
+
+    Creates numbered files in the output directory:
+    - 00_inputs.npz: input_ids, ref_s, speed
+    - 01_bert_out.npy: d_en
+    - 02_duration_out.npz: duration_logits, d
+    - 03_alignment.npz: pred_dur, frames
+    - 04_f0n_out.npz: f0, n
+    - 05_text_enc_out.npy: t_en
+    - 06_audio.npy: audio_trimmed (final output)
+    """
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"Saving tensors to {out_path}/...")
+
+    # Inputs
+    np.savez(
+        out_path / "00_inputs.npz",
+        input_ids=np.asarray(input_ids, dtype=np.int64),
+        ref_s=np.asarray(ref_s, dtype=np.float32),
+        speed=np.array([speed], dtype=np.float32),
+    )
+
+    # BERT output
+    if "d_en" in trace_tvm:
+        np.save(out_path / "01_bert_out.npy", np.asarray(trace_tvm["d_en"], dtype=np.float32))
+
+    # Duration output
+    if "duration_logits" in trace_tvm or "d" in trace_tvm:
+        data = {}
+        if "duration_logits" in trace_tvm:
+            data["duration_logits"] = np.asarray(trace_tvm["duration_logits"], dtype=np.float32)
+        if "d" in trace_tvm:
+            data["d"] = np.asarray(trace_tvm["d"], dtype=np.float32)
+        np.savez(out_path / "02_duration_out.npz", **data)
+
+    # Alignment
+    if "pred_dur" in trace_tvm or "frames" in trace_tvm:
+        data = {}
+        if "pred_dur" in trace_tvm:
+            data["pred_dur"] = np.asarray(trace_tvm["pred_dur"], dtype=np.int64)
+        if "frames" in trace_tvm:
+            data["frames"] = np.array([trace_tvm["frames"]], dtype=np.int64)
+        np.savez(out_path / "03_alignment.npz", **data)
+
+    # F0N output
+    if "f0" in trace_tvm or "n" in trace_tvm:
+        data = {}
+        if "f0" in trace_tvm:
+            data["f0"] = np.asarray(trace_tvm["f0"], dtype=np.float32)
+        if "n" in trace_tvm:
+            data["n"] = np.asarray(trace_tvm["n"], dtype=np.float32)
+        np.savez(out_path / "04_f0n_out.npz", **data)
+
+    # Text encoder output
+    if "t_en" in trace_tvm:
+        np.save(out_path / "05_text_enc_out.npy", np.asarray(trace_tvm["t_en"], dtype=np.float32))
+
+    # Final audio
+    if "audio_trimmed" in trace_tvm:
+        np.save(out_path / "06_audio.npy", np.asarray(trace_tvm["audio_trimmed"], dtype=np.float32))
+
+    print(f"  Saved {len(list(out_path.glob('*.np*')))} tensor files")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate intermediate Kokoro stages (PyTorch vs TVM)")
     parser.add_argument("--text", type=str, default="Hello world", help="Input text")
@@ -762,6 +836,12 @@ def main() -> int:
         choices=["inference", "hf"],
         help="Select style source for TVM pipeline: inference voice pack (default) or HF voice pack (matches PyTorch)",
     )
+    parser.add_argument(
+        "--save-tensors",
+        type=str,
+        default=None,
+        help="Save intermediate tensors to this directory as .npy files for Rust validation",
+    )
     args = parser.parse_args()
 
     _set_use_rich(not args.no_rich)
@@ -798,6 +878,16 @@ def main() -> int:
 
     pipeline = KokoroPipeline(args.lib_dir, args.device, hybrid=args.hybrid)
     trace_tvm = pipeline.trace(input_ids_tvm, ref_s_tvm, speed=args.speed)
+
+    # Export tensors for Rust validation if requested
+    if args.save_tensors:
+        _save_trace_tensors(
+            args.save_tensors,
+            trace_tvm=trace_tvm,
+            input_ids=input_ids_tvm.numpy() if hasattr(input_ids_tvm, "numpy") else np.asarray(input_ids_tvm),
+            ref_s=ref_s_tvm.numpy() if hasattr(ref_s_tvm, "numpy") else np.asarray(ref_s_tvm),
+            speed=args.speed,
+        )
 
     cur_len = int(trace_static["cur_len"])
     _rule("Inputs")

@@ -19,7 +19,9 @@ TARGET_CONFIGS = {
         "description": "macOS (Metal GPU + ARM64 CPU)",
     },
     "metal-ios": {
-        "target_host": "llvm -mtriple=arm64-apple-ios",
+        # TODO: arm64-apple-ios triple is producing macOS Mach-O for iOS builds.
+        # "target_host": "llvm -mtriple=arm64-apple-ios",
+        "target_host": "llvm -mtriple=aarch64-apple-ios",
         "target": "metal",
         "extension": ".dylib",
         "description": "iOS (Metal GPU + ARM64 CPU)",

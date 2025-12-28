@@ -41,8 +41,12 @@ venv.bak/
 
 # Rust
 /target
+rust/target/
 **/*.rs.bk
 Cargo.lock
+
+# Converted assets (voice packs, vocab)
+assets/
 
 # C++
 *.d
