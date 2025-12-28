@@ -164,6 +164,7 @@ macro_rules! tvm_err {
 # export LIBRARY_PATH="/path/to/tvm-ffi/build/lib:$LIBRARY_PATH"
 # cargo build --release
 set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH
+set -x DYLD_LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $DYLD_LIBRARY_PATH
 cargo build --release --features frb
 # NOTE: perhaps: --target aarch64-apple-ios or [TODO:add android flag]
 ```

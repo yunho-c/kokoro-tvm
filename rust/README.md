@@ -38,11 +38,22 @@ cargo build --release
 ### 3. Run Inference
 
 ```bash
+set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/build" $LIBRARY_PATH
+set -x DYLD_LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/build" $DYLD_LIBRARY_PATH
 cargo run --release -- \
   --phonemes "həlˈoʊ wˈɜːld" \
   --voice ../assets/af_bella.npy \
   --vocab ../assets/vocab.json \
   --lib-dir ../tvm_output_llvm \
+  --output hello.wav \
+  --speed 1.0
+
+cargo run --release -- \
+  --phonemes "həlˈoʊ wˈɜːld" \
+  --voice ../assets/af_bella.npy \
+  --vocab ../assets/vocab.json \
+  --lib-dir ../tvm_output_metal \
+  --device metal \
   --output hello.wav \
   --speed 1.0
 ```

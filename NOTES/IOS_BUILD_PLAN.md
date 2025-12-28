@@ -219,7 +219,7 @@ cd rust
 set -x LIBRARY_PATH "/Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build/lib" $LIBRARY_PATH # NOTE: try without this line too #
 set -x TVM_BUILD_DIR /Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/build-ios
 set -x TVM_FFI_BUILD_DIR /Users/yunhocho/GitHub/kokoro-tvm/reference/tvm/3rdparty/tvm-ffi/build-ios
-cargo build --target aarch64-apple-ios --features frb
+RUSTFLAGS="-C target-feature=+fp16,+fullfp16" cargo build --target aarch64-apple-ios --features frb
 # --release
 ```
 
