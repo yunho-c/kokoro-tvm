@@ -5,10 +5,9 @@ use crate::g2p::{parse_language, G2pEngine};
 use crate::pipeline::PipelineTimings;
 use crate::{load_voice_manifest, KokoroPipeline, Vocab, VoiceInfo, VoiceManifest, VoicePack};
 use anyhow::{Context, Result};
-#[cfg(feature = "frb")]
-use crate::frb_generated::StreamSink;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::result::Result as StdResult;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
@@ -26,7 +25,6 @@ pub struct RuntimeConfig {
     pub voice_path: PathBuf,
 }
 
-#[cfg_attr(feature = "frb", flutter_rust_bridge::frb(opaque))]
 #[derive(Clone, Debug)]
 pub struct CancelToken {
     cancelled: Arc<AtomicBool>,
@@ -171,11 +169,10 @@ enum RuntimeCommand {
     GetLanguages {
         reply: mpsc::Sender<Result<Vec<String>, String>>,
     },
-    #[cfg(feature = "frb")]
     SynthesizeStream {
         request: SynthesisRequest,
         cancel_token: CancelToken,
-        sink: StreamSink<AudioChunk>,
+        on_chunk: ChunkCallback,
         reply: mpsc::Sender<Result<(), String>>,
     },
     Status {
@@ -185,6 +182,8 @@ enum RuntimeCommand {
         reply: mpsc::Sender<Result<(), String>>,
     },
 }
+
+type ChunkCallback = Box<dyn Fn(AudioChunk) -> StdResult<(), String> + Send>;
 
 struct RuntimeWorker {
     config: Option<RuntimeConfig>,
@@ -412,13 +411,15 @@ impl RuntimeWorker {
         }
     }
 
-    #[cfg(feature = "frb")]
-    fn synthesize_stream(
+    fn synthesize_stream<F>(
         &mut self,
         request: &SynthesisRequest,
         cancel_token: CancelToken,
-        sink: StreamSink<AudioChunk>,
-    ) -> Result<()> {
+        on_chunk: F,
+    ) -> Result<()>
+    where
+        F: Fn(AudioChunk) -> Result<()>,
+    {
         let chunk_size_ms = request.chunk_size_ms.unwrap_or(DEFAULT_CHUNK_SIZE_MS);
         if chunk_size_ms == 0 {
             anyhow::bail!("chunk_size_ms must be greater than zero");
@@ -497,7 +498,7 @@ impl RuntimeWorker {
                 None
             };
 
-            sink.add(AudioChunk {
+            on_chunk(AudioChunk {
                 samples: audio,
                 sample_rate: SAMPLE_RATE,
                 is_final,
@@ -505,7 +506,7 @@ impl RuntimeWorker {
                 start_sample,
                 diagnostics,
             })
-            .map_err(|err| anyhow::anyhow!("{}", err))?;
+            ?;
 
             start_sample += audio_len;
         }
@@ -616,15 +617,16 @@ impl RuntimeHandle {
                         };
                         let _ = reply.send(result);
                     }
-                    #[cfg(feature = "frb")]
                     RuntimeCommand::SynthesizeStream {
                         request,
                         cancel_token,
-                        sink,
+                        on_chunk,
                         reply,
                     } => {
                         let result =
-                            match worker.synthesize_stream(&request, cancel_token, sink) {
+                            match worker.synthesize_stream(&request, cancel_token, move |chunk| {
+                                on_chunk(chunk).map_err(anyhow::Error::msg)
+                            }) {
                             Ok(()) => Ok(()),
                             Err(err) => {
                                 eprintln!("Synthesize stream failed: {:#}", err);
@@ -676,7 +678,7 @@ pub fn init(config: RuntimeConfig) -> Result<()> {
             config,
             reply: reply_tx,
         })
-        .context("Failed to send init request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send init request"))?;
     recv_result(reply_rx)
 }
 
@@ -696,7 +698,7 @@ pub fn warmup() -> Result<()> {
     handle
         .tx
         .send(RuntimeCommand::Warmup { reply: reply_tx })
-        .context("Failed to send warmup request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send warmup request"))?;
     recv_result(reply_rx)
 }
 
@@ -709,16 +711,18 @@ pub fn synthesize(request: SynthesisRequest) -> Result<SynthesisResult> {
             request,
             reply: reply_tx,
         })
-        .context("Failed to send synthesize request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send synthesize request"))?;
     recv_result(reply_rx)
 }
 
-#[cfg(feature = "frb")]
-pub fn synthesize_stream(
+pub fn synthesize_stream<F>(
     request: SynthesisRequest,
     cancel_token: CancelToken,
-    sink: StreamSink<AudioChunk>,
-) -> Result<()> {
+    on_chunk: F,
+) -> Result<()>
+where
+    F: Fn(AudioChunk) -> StdResult<(), String> + Send + 'static,
+{
     let handle = runtime_handle()?;
     let (reply_tx, reply_rx) = mpsc::channel();
     handle
@@ -726,10 +730,10 @@ pub fn synthesize_stream(
         .send(RuntimeCommand::SynthesizeStream {
             request,
             cancel_token,
-            sink,
+            on_chunk: Box::new(on_chunk),
             reply: reply_tx,
         })
-        .context("Failed to send synthesize stream request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send synthesize stream request"))?;
     recv_result(reply_rx)
 }
 
@@ -739,7 +743,7 @@ pub fn shutdown() -> Result<()> {
     handle
         .tx
         .send(RuntimeCommand::Reset { reply: reply_tx })
-        .context("Failed to send shutdown request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send shutdown request"))?;
     recv_result(reply_rx)
 }
 
@@ -749,7 +753,7 @@ pub fn status() -> Result<RuntimeStatus> {
     handle
         .tx
         .send(RuntimeCommand::Status { reply: reply_tx })
-        .context("Failed to send status request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send status request"))?;
     recv_result(reply_rx)
 }
 
@@ -759,7 +763,7 @@ pub fn get_voices() -> Result<Vec<VoiceInfo>> {
     handle
         .tx
         .send(RuntimeCommand::GetVoices { reply: reply_tx })
-        .context("Failed to send get voices request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send get voices request"))?;
     recv_result(reply_rx)
 }
 
@@ -769,11 +773,10 @@ pub fn get_languages() -> Result<Vec<String>> {
     handle
         .tx
         .send(RuntimeCommand::GetLanguages { reply: reply_tx })
-        .context("Failed to send get languages request")?;
+        .map_err(|_| anyhow::anyhow!("Failed to send get languages request"))?;
     recv_result(reply_rx)
 }
 
-#[cfg(feature = "frb")]
 fn segment_phonemes(phonemes: &str, chunk_size_ms: u32, sample_rate: u32) -> Vec<String> {
     fn is_hard_boundary(ch: char) -> bool {
         matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '|' | '\n' | '\r')
@@ -833,7 +836,7 @@ fn segment_phonemes(phonemes: &str, chunk_size_ms: u32, sample_rate: u32) -> Vec
     chunks
 }
 
-#[cfg(all(test, feature = "frb"))]
+#[cfg(test)]
 mod tests {
     use super::segment_phonemes;
 

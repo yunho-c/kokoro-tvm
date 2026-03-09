@@ -2,9 +2,6 @@
 //!
 //! A Rust library for running Kokoro TTS inference using TVM-compiled modules.
 
-#[cfg(feature = "frb")]
-mod frb_generated;
-
 mod audio;
 pub mod error;
 pub mod g2p;
@@ -14,8 +11,6 @@ pub mod runtime;
 pub mod validation;
 pub mod vocab;
 pub mod voice;
-#[cfg(feature = "frb")]
-pub mod frb_api;
 
 pub use audio::save_wav;
 pub use error::TtsError;
@@ -45,10 +40,7 @@ pub use runtime::{
     SynthesisResult,
     VoiceSelection,
 };
-#[cfg(feature = "frb")]
 pub use runtime::synthesize_stream;
-#[cfg(feature = "frb")]
-pub use frb_api::*;
 pub use vocab::Vocab;
 pub use voice::{load_voice_manifest, VoiceInfo, VoiceManifest, VoicePack};
 
